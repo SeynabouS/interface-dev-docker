@@ -144,4 +144,3 @@ Cette nouvelle page permet :
 
 **Seynabou S.**
 
-📫 Pour toute question, ouvrez une issue sur GitHub.
