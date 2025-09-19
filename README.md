@@ -23,25 +23,37 @@ Docker Desktop (ou Docker Engine) + Docker Compose
 
 Ports libres : 8000 (appli) et 5432 (PostgreSQL)
 
-# ⚙️ Configuration
+## ⚙️ Configuration
 
-Cloner le dépôt
+1) **Cloner le dépôt**  
+```bash
+git clone <URL_DU_REPO> le-moot
+cd le-moot/interface-local
+```
 
-git clone https://github.com/SeynabouS/interface-dev-docker.git
-cd interface-dev-docker
-
-
-Variables d’environnement
+2) **Variables d’environnement**  
 Copie le fichier d’exemple et adapte si besoin :
-
+```bash
 cp .env.docker.example .env
+```
 
-Valeurs par défaut (tu peux les garder en local) :
-
+Valeurs par défaut (tu peux les garder en local) :  
+```env
 DB_USERNAME=app
 DB_PASSWORD=app
 DB_NAME=telecom_db
 SECRET_KEY=change-me-please
+
+# pgAdmin est activé dans docker-compose
+PGADMIN_DEFAULT_EMAIL=admin@example.com
+PGADMIN_DEFAULT_PASSWORD=admin
+
+# Option dev : affiche le lien de réinit de mot de passe dans l’UI
+RESET_LINK_VIA_UI=1
+```
+
+> **DB_HOST** et **DB_PORT** sont déjà gérés par Docker (`db:5432`).
+
 
 # pgAdmin est activé dans docker-compose pour vérifier la base et l’import
 PGADMIN_DEFAULT_EMAIL=admin@example.com
