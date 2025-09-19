@@ -121,7 +121,7 @@ Sinon, récupérer le lien :
 
 docker compose logs -f web | grep RESET
 
-# 📥 Importer un export (jeu de fichiers)
+📥 Importer un export (jeu de fichiers)
 
 Se connecter à l’UI → “Analyse d’un Export à une Date Donnée”
 
@@ -138,7 +138,7 @@ Les tables sont créées dans gracethd avec le nom : YYYY-MM-DD_nomFichier.ext
 
 Actuellement l’upload est HS. Utiliser la restauration du backup (section ci-dessus) pour tester les analyses.
 
-# 🔎 Lancer des analyses
+🔎 Lancer des analyses
 
 Toujours sur la page principale :
 
@@ -214,7 +214,7 @@ docker compose down -v && docker compose up -d --build
 
 Port occupé : modifier ports: dans docker-compose.yml (ex. 8080:8000)
 
-pgAdmin (si activé) : hôte db, port 5432, login DB_USERNAME / DB_PASSWORD
+pgAdmin : hôte db, port 5432, login DB_USERNAME / DB_PASSWORD
 
 🧯 Arrêt & nettoyage
 # Arrêter les conteneurs
