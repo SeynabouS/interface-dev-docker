@@ -67,3 +67,17 @@ button {
 button:hover {
     background: #003d6b;
 }
+
+.sql-preview-block {
+    background: #f5f5f8;
+    border: 1px solid #ccc;
+    border-radius: 7px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    margin: 8px 0;
+    max-width: 100%;
+    overflow-x: auto;
+    word-break: break-all;
+    font-family: 'Fira Mono', 'Menlo', 'Consolas', 'Courier', monospace;
+}

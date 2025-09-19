@@ -1,9 +1,12 @@
 // ========== RESILIENCE.JS COMPLET CORRIGÉ ==========
+
 document.addEventListener('DOMContentLoaded', function () {
     const map = L.map('resilience-map').setView([48.86, 2.35], 10);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
     let layerStore = {}; // Stocke les couches actives
+    let mainLayers = [];
+    let aleaLayers = [];
 
     const fileInput = document.getElementById('resilience-files');
     const fileNamesContainer = document.getElementById('file-names-container');
@@ -14,6 +17,14 @@ document.addEventListener('DOMContentLoaded', function () {
     const tableContainer = document.getElementById('table-container');
     const tableSelector = document.getElementById('table-selector');
     const layerControls = document.getElementById('layer-controls');
+
+    // === Nouveau : Formulaire création de vue matérialisée ===
+    const layerMain = document.getElementById('layer-main');
+    const layerAlea = document.getElementById('layer-alea');
+    const viewNameInput = document.getElementById('view-name');
+    const previewBtn = document.getElementById('preview-view-btn');
+    const createBtn = document.getElementById('create-view-btn');
+    const viewSummary = document.getElementById('view-summary');
 
     // ========== Upload de fichiers ========== //
     fileInput.addEventListener('change', () => {
@@ -57,87 +68,203 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     // ========== Mise à jour des couches disponibles ========== //
-    function updateLayerList() {
+   function updateLayerList() {
+        // Selecteurs
+        const layerMain = document.getElementById('layer-main');
+        const layerAlea = document.getElementById('layer-alea');
+        const layerSelect = document.getElementById('layer-selector');
+        const tableSelector = document.getElementById('table-selector');
+        const layerControls = document.getElementById('layer-controls');
+        const aleaSupportList = document.getElementById('alea-support-list');
+        layerSelect.innerHTML = '';
+        tableSelector.innerHTML = '';
+        layerControls.innerHTML = '';
+        if (layerMain) layerMain.innerHTML = '';
+        if (layerAlea) layerAlea.innerHTML = '';
+        aleaSupportList.innerHTML = '';
+        layerStore = {};
+
+        // Charger couches principales (gauche)
         fetch('/resilience_layers')
             .then(r => r.json())
-            .then(layers => {
-                // Réinitialiser tous les select et couches
-                layerSelect.innerHTML = '';
-                tableSelector.innerHTML = '';
-                layerControls.innerHTML = '';
-                layerStore = {};
+            .then(mainLayers => {
+                // Pour le select principal
+                mainLayers.forEach(layer => {
+                    // Pour visualisation sur carte
+                    const opt = document.createElement('option');
+                    opt.value = layer;
+                    opt.textContent = layer;
+                    layerSelect.appendChild(opt);
 
-                const layerA = document.getElementById('layer-a');
-                const layerB = document.getElementById('layer-b');
-                layerA.innerHTML = '';
-                layerB.innerHTML = '';
+                    // Pour table attributaire
+                    const opt2 = document.createElement('option');
+                    opt2.value = layer;
+                    opt2.textContent = layer;
+                    tableSelector.appendChild(opt2);
 
-                layers.forEach(layer => {
-                    // Remplir les 4 dropdowns
-                    [layerSelect, tableSelector, layerA, layerB].forEach(select => {
-                        const opt = document.createElement('option');
-                        opt.value = layer;
-                        opt.textContent = layer;
-                        select.appendChild(opt);
-                    });
+                    // Pour création de vue matérialisée
+                    if (layerMain) {
+                        const opt3 = document.createElement('option');
+                        opt3.value = layer;
+                        opt3.textContent = layer;
+                        layerMain.appendChild(opt3);
+                    }
 
-                    // Ajout dans la gestion des couches (check, couleur, delete)
+                    // Gestion affichage/suppression
                     const wrapper = document.createElement('div');
                     wrapper.style.marginBottom = '10px';
                     wrapper.innerHTML = `
                         <input type="checkbox" id="toggle-${layer}" class="layer-toggle" data-layer="${layer}">
                         <label for="toggle-${layer}"><strong>${layer}</strong></label>
                         <input type="color" class="layer-color" data-layer="${layer}" value="#005aa3" style="margin-left:10px;">
-
                         <select class="download-format" data-layer="${layer}" style="margin-left:10px;">
                             <option value="">⬇ Format</option>
                             <option value="csv">CSV</option>
                             <option value="html">HTML</option>
                         </select>
-
                         <button class="delete-layer-btn" data-layer="${layer}" style="margin-left:10px;">🗑 Supprimer</button>
                     `;
-
-
-
                     layerControls.appendChild(wrapper);
+                });
+            });
+
+        // Charger couches support (droite)
+        fetch('/resilience_layers_support')
+            .then(r => r.json())
+            .then(aleaLayers => {
+                // Affichage juste en mode info à droite
+                if (aleaSupportList) {
+                    if (aleaLayers.length === 0) {
+                        aleaSupportList.innerHTML = '<em>Aucune couche de support détectée.</em>';
+                    } else {
+                        aleaSupportList.innerHTML = aleaLayers
+                            .map(layer => `<span style="background:#eef; border-radius:8px; padding:3px 9px; margin:2px 0; display:inline-block;">${layer}</span>`)
+                            .join(' ');
+                    }
+                }
+                // Pour création de vue matérialisée (multi-select)
+                if (layerAlea) {
+                    aleaLayers.forEach(layer => {
+                        const opt = document.createElement('option');
+                        opt.value = layer;
+                        opt.textContent = layer;
+                        layerAlea.appendChild(opt);
+                    });
+                }
+                // Pour la table attributaire (lecture seule)
+                aleaLayers.forEach(layer => {
+                    const opt2 = document.createElement('option');
+                    opt2.value = layer;
+                    opt2.textContent = layer + " (support)";
+                    tableSelector.appendChild(opt2);
                 });
             })
             .catch(err => {
-                console.error("Erreur lors du chargement des couches :", err);
-                alert("Impossible de charger les couches de la base.");
+                if (aleaSupportList) aleaSupportList.innerHTML = '<span style="color:red">Erreur lors du chargement des couches support.</span>';
             });
     }
 
-    const createBtn = document.getElementById('create-view-btn');
+
+
+    // === Gestion création de vue matérialisée ===
+
+    // Déclaration d'une variable pour suivre l'état
+    let previewData = null;
+
+    previewBtn.addEventListener('click', function() {
+        const mainTable = layerMain.value;
+        const aleaTables = Array.from(layerAlea.selectedOptions).map(o => o.value);
+        const viewName = viewNameInput.value.trim();
+
+        if (!mainTable || aleaTables.length === 0 || !viewName) {
+            alert("Veuillez choisir une table principale, au moins une couche alea et un nom de vue.");
+            return;
+        }
+
+        // Si le contenu est déjà chargé, on toggle simplement l'affichage
+        if (previewData && viewSummary.innerHTML.includes('preview-content')) {
+            const previewContent = document.getElementById('preview-content');
+            const isVisible = previewContent.style.display !== 'none';
+            
+            previewContent.style.display = isVisible ? 'none' : '';
+            previewBtn.innerHTML = isVisible 
+                ? 'Aperçu de la vue matérialisée ▲' 
+                : 'Aperçu de la vue matérialisée ▼';
+            return;
+        }
+
+        // Sinon, on fait la requête pour charger les données
+        fetch('/create_resilience_view', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                main_table: mainTable,
+                alea_tables: aleaTables,
+                view_name: viewName,
+                preview_only: true
+            })
+        })
+        .then(r => r.json())
+        .then(res => {
+            if (res.status === 'preview') {
+                previewData = res; // On stocke les données pour éviter de recharger
+                
+                viewSummary.innerHTML = `
+                    <div id="preview-content" style="margin-top:8px;">
+                        <strong>Dépendances :</strong> ${res.dependencies.join(', ')}<br>
+                        <strong>Description&nbsp;:</strong><br>
+                        <div style="margin:8px 0 12px 0; color:#235;">
+                            ${res.description}
+                        </div>
+                        <strong>SQL généré :</strong>
+                        <div class="sql-preview-block">${res.sql}</div>
+                    </div>
+                `;
+                
+                // On met à jour le texte du bouton avec la flèche
+                previewBtn.innerHTML = 'Aperçu de la vue matérialisée ▼';
+            } else {
+                viewSummary.innerHTML = `<span style="color:red;">Erreur : ${res.message}</span>`;
+            }
+        })
+        .catch(e => {
+            viewSummary.innerHTML = `<span style="color:red;">Erreur réseau : ${e.message}</span>`;
+        });
+    });
 
     createBtn.addEventListener('click', () => {
-        const tableA = document.getElementById('layer-a').value;
-        const tableB = document.getElementById('layer-b').value;
-        const viewName = document.getElementById('view-name').value.trim();
+        const mainTable = layerMain.value;
+        const aleaTables = Array.from(layerAlea.selectedOptions).map(o => o.value);
+        const viewName = viewNameInput.value.trim();
 
-        if (!tableA || !tableB || !viewName) {
-            return alert("Veuillez remplir tous les champs.");
+        if (!mainTable || aleaTables.length === 0 || !viewName) {
+            alert("Veuillez choisir une table principale, au moins une couche alea et un nom de vue.");
+            return;
         }
 
         fetch('/create_resilience_view', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ table_a: tableA, table_b: tableB, view_name: viewName })
+            body: JSON.stringify({
+                main_table: mainTable,
+                alea_tables: aleaTables,
+                view_name: viewName
+            })
         })
         .then(r => r.json())
         .then(res => {
             if (res.status === 'ok') {
                 alert("✅ Vue créée avec succès.");
-                updateLayerList(); // <== ici c'est visible car dans le même bloc
+                viewSummary.innerHTML = '';
+                updateLayerList();
             } else {
-                alert("❌ Erreur : " + res.message);
+                alert("❌ Erreur : " + res.message + "\n\n" + (res.sql || ""));
             }
         })
         .catch(e => alert("Erreur réseau : " + e.message));
     });
 
-
+    // ========== Le reste de tes fonctionnalités Leaflet, download, suppression, table attributaire... ==========
 
     function displayLayer(layerName, color = "#005aa3") {
         // Supprime la couche si elle est déjà affichée
@@ -145,7 +272,6 @@ document.addEventListener('DOMContentLoaded', function () {
             map.removeLayer(layerStore[layerName]);
             delete layerStore[layerName];
         }
-
         // Recharge la couche depuis le backend
         fetch(`/resilience_layer_data/${layerName}`)
             .then(r => r.json())
@@ -176,7 +302,6 @@ document.addEventListener('DOMContentLoaded', function () {
             })
             .catch(e => alert("Erreur : " + e.message));
     }
-
 
     function loadAttributeTable(layerName) {
         fetch(`/resilience_layer_data/${layerName}`)
@@ -223,10 +348,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const color = e.target.value;
             const checkbox = document.querySelector(`input.layer-toggle[data-layer="${layerName}"]`);
             if (checkbox.checked) {
-                // Si visible → changer immédiatement la couleur
                 displayLayer(layerName, color);
-            } else {
-                // Sinon → stocke la couleur, rien à faire
             }
         }
         if (e.target.classList.contains('download-format')) {
@@ -237,13 +359,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 e.target.value = '';
             }
         }
-
-    
     });
 
     layerControls.addEventListener('click', function (e) {
         if (!e.target.classList.contains('delete-layer-btn')) return;
-
         const layer = e.target.dataset.layer;
         fetch(`/resilience_dependencies/${layer}`)
             .then(r => r.json())
@@ -275,11 +394,6 @@ document.addEventListener('DOMContentLoaded', function () {
                         }
                     });
                 }
-                if (e.target.classList.contains('download-layer-btn')) {
-                    const layer = e.target.dataset.layer;
-                    window.open(`/download_resilience_layer/${layer}`, '_blank');
-                }
-
             });
     });
 

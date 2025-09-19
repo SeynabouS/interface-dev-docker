@@ -24,33 +24,72 @@ import traceback
 from datetime import datetime
 import zipfile
 import io
-import os
 from zipfile import ZipFile
-import os, tempfile, requests
+import tempfile, requests
 from flask import jsonify, request
-from zipfile import ZipFile
+import re
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from dotenv import load_dotenv
+load_dotenv() 
+
+from sqlalchemy import create_engine, text
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
 
-# Configuration du logger pour le debug
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s')
+# --- Options app ---
+app.config['RESET_LINK_VIA_UI'] = os.getenv('RESET_LINK_VIA_UI', '0') == '1'
+app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "change-me-in-prod")
 
-# Connexion PostgreSQL
-username = urllib.parse.quote_plus(os.getenv("DB_USERNAME"))
-password = urllib.parse.quote_plus(os.getenv("DB_PASSWORD"))
-host = os.getenv("DB_HOST")
-dbname = os.getenv("DB_NAME")
-port = "5433"
+# --- Logging simple et lisible ---
+logging.basicConfig(
+    level=logging.DEBUG if os.getenv("FLASK_DEBUG", "0") == "1" else logging.INFO,
+    format="%(asctime)s %(levelname)s:%(message)s"
+)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = f'postgresql://{username}:{password}@{host}:{port}/{dbname}?options=-csearch_path=gracethd'
-#app.config['SQLALCHEMY_DATABASE_URI'] = f'postgresql://{username}:{password}@{host}:{port}/{dbname}'
+# --- Connexion PostgreSQL ---
+username = urllib.parse.quote_plus(os.getenv("DB_USERNAME", "postgres"))
+password = urllib.parse.quote_plus(os.getenv("DB_PASSWORD", ""))
+host     = os.getenv("DB_HOST", "db")
+dbname   = os.getenv("DB_NAME", "postgres")
+port     = os.getenv("DB_PORT", "5432")  # <- IMPORTANT : 5432 dans le réseau Docker
 
+search_path = os.getenv("DB_SEARCH_PATH", "gracethd,resilience,public")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = (
+    f'postgresql://{username}:{password}@{host}:{port}/{dbname}'
+    f'?options=-csearch_path%3D{search_path}'
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Evite les connexions mortes si Postgres redémarre
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 
-# Initialisation de la base de données
+# --- DB objects ---
 db = SQLAlchemy(app)
-engine = create_engine(app.config['SQLALCHEMY_DATABASE_URI'])
+engine = create_engine(app.config['SQLALCHEMY_DATABASE_URI'], pool_pre_ping=True)
+
+# --- Base URL pour appels HTTP internes (à la place de 127.0.0.1:5000 en dev) ---
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000")
+
+@app.get("/healthz")
+def healthz():
+    """Petite sonde pour vérifier l'app et la DB."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return jsonify({"status": "ok", "db": db_ok}), 200 if db_ok else 500
+
+
+@app.cli.command("init-db")
+def init_db_cli():
+    """Créer les tables (à lancer manuellement si besoin) :
+       docker compose exec web flask --app app init-db
+    """
+    with app.app_context():
+        db.create_all()
+    print("Database tables created.")
 
 # Modèle utilisateur
 class User(db.Model):
@@ -66,9 +105,23 @@ class User(db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-# Création des tables au démarrage de l'application
-with app.app_context():
-    db.create_all()
+def _serializer():
+    # Le SECRET_KEY existe déjà dans ta config (env). On ajoute un "salt" dédié.
+    return URLSafeTimedSerializer(app.config['SECRET_KEY'], salt='password-reset')
+
+def make_reset_token(user):
+    # On inclut le hash courant: si le mdp change, l'ancien jeton ne marchera plus
+    payload = {'uid': user.id, 'ph': user.password_hash}
+    return _serializer().dumps(payload)
+
+def load_user_from_token(token, max_age_seconds=3600):
+    data = _serializer().loads(token, max_age=max_age_seconds)
+    user = User.query.get(data.get('uid'))
+    if not user or user.password_hash != data.get('ph'):
+        # Jeton forgé / expiré / mdp déjà changé
+        raise BadSignature("Invalid token")
+    return user
+
 
 # Middleware pour vérifier si l'utilisateur est connecté
 def login_required(f):
@@ -102,6 +155,78 @@ def logout():
     flash("Déconnexion réussie.", "success")
     return redirect(url_for('login'))
 
+@app.route('/forgot', methods=['GET', 'POST'])
+def forgot_password():
+    # Ne pas divulguer si le compte existe ou non -> anti-enumération.
+    if request.method == 'POST':
+        username = (request.form.get('username') or "").strip()
+        if username:
+            user = User.query.filter_by(username=username).first()
+            if user:
+                token = make_reset_token(user)
+                reset_link = url_for('reset_password', token=token, _external=True)
+                # En prod: envoyer par email (non présent ici). 
+                # En dev: on l'affiche (flash) et on log pour faciliter.
+                app.logger.info(f"[RESET] Lien pour {username}: {reset_link}")
+                flash("Si un compte existe pour cet identifiant, un lien de réinitialisation a été généré.", "info")
+                # Option DEV : afficher le lien si app.debug
+                show_link_in_ui = app.debug or app.config.get('RESET_LINK_VIA_UI')
+                if show_link_in_ui:
+                    # Génère un token réel si l'utilisateur existe, sinon un token "dummy"
+                    if user:
+                        token = make_reset_token(user)
+                    else:
+                        # Token signé mais qui échouera à la validation -> évite de révéler si le compte existe
+                        token = _serializer().dumps({'uid': 0, 'ph': 'x'})
+
+                    reset_link = url_for('reset_password', token=token, _external=True)
+                    flash(
+                        f'''Lien de réinitialisation :
+                            <a class="btn btn-primary" href="{reset_link}">
+                            Changer mon mot de passe
+                            </a>''',
+                        "warning"
+                    )
+
+            else:
+                flash("Si un compte existe pour cet identifiant, un lien de réinitialisation a été généré.", "info")
+        else:
+            flash("Merci de saisir votre identifiant.", "warning")
+        return redirect(url_for('forgot_password'))
+    return render_template('forgot_password.html')
+
+
+@app.route('/reset/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    try:
+        # Ne valide pas encore: on vérifie uniquement l’expiration à l’envoi du formulaire.
+        if request.method == 'POST':
+            new_password = request.form.get('password') or ""
+            confirm      = request.form.get('confirm') or ""
+            if not new_password or len(new_password) < 8:
+                flash("Mot de passe trop court (min. 8 caractères).", "danger")
+                return redirect(request.url)
+            if new_password != confirm:
+                flash("Les mots de passe ne correspondent pas.", "danger")
+                return redirect(request.url)
+
+            # Validation définitive du jeton (max_age 1h ici)
+            user = load_user_from_token(token, max_age_seconds=3600)
+            user.set_password(new_password)
+            db.session.commit()
+            flash("Votre mot de passe a été réinitialisé. Vous pouvez vous connecter.", "success")
+            return redirect(url_for('login'))
+
+        # GET => simple formulaire
+        return render_template('reset_password.html')
+
+    except SignatureExpired:
+        flash("Le lien de réinitialisation a expiré. Recommencez l’opération.", "danger")
+        return redirect(url_for('forgot_password'))
+    except BadSignature:
+        flash("Lien invalide.", "danger")
+        return redirect(url_for('forgot_password'))
+
 # Route protégée pour accéder à `interface.html`
 @app.route('/')
 @login_required
@@ -118,8 +243,10 @@ class Export(db.Model):
     table_name = db.Column(db.String(255), nullable=False)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT','5000')), debug=os.getenv('FLASK_DEBUG','0')=='1')
+
 
 
 # Fonction pour créer les tables
@@ -220,6 +347,29 @@ def read_file_generic(file_path):
     # Si aucun encodage ne fonctionne
     raise ValueError(f"Erreur lors de la lecture du fichier {file_path}: Aucun encodage valide trouvé.")
 
+def read_table(export_date: str, suffix_with_ext: str) -> pd.DataFrame:
+    """
+    Charge la table dont le nom est f"{export_date}_{suffix_with_ext}".
+    Si cette table n'existe pas, bascule sur l'autre extension (.csv ↔ .dbf).
+    """
+    table1 = f"{export_date}_{suffix_with_ext}"
+    if suffix_with_ext.lower().endswith('.csv'):
+        table2 = table1[:-4] + '.dbf'
+    else:
+        table2 = table1[:-4] + '.csv'
+
+    try:
+        return pd.read_sql(f'SELECT * FROM "{table1}"', engine)
+    except Exception:
+        return pd.read_sql(f'SELECT * FROM "{table2}"', engine)
+
+def load_table_any(export_date: str, base_name: str, prefer: str = '.csv') -> pd.DataFrame:
+    """
+    Charge la table pour base_name (ex: 't_cable'), en privilégiant prefer ('.csv' par défaut),
+    et bascule automatiquement sur l'autre extension si besoin, grâce à read_table().
+    """
+    return read_table(export_date, f'{base_name}{prefer}')
+
 @app.route('/image/<path:filename>')
 def serve_image(filename):
     return send_from_directory('image', filename)
@@ -293,6 +443,7 @@ def upload_files():
 if __name__ == '__main__':
     create_tables()  # Assurer que les tables sont créées avant de lancer l'application
     app.run(debug=True)
+
 
 @app.route('/arborescence_livrable', methods=['POST'])
 def arborescence_livrable():
@@ -710,105 +861,86 @@ def analyze_fourreaux():
     try:
         logging.info("Requête reçue pour l'analyse des fourreaux")
 
-        # Vérifier que la requête contient un JSON valide
         if not request.is_json:
-            logging.error("Requête invalide : JSON attendu")
             return jsonify({"error": "Requête invalide, JSON attendu"}), 400
 
-        # Récupérer la date d'export depuis la requête JSON
-        data = request.get_json()
-        export_date = data.get('export_date')
+        export_date = request.get_json().get('export_date')
         if not export_date:
-            logging.error("Date d'export non spécifiée")
             return jsonify({"error": "Date d'export non spécifiée"}), 400
 
-        logging.info(f"Date d'export reçue : {export_date}")
+        # ---- helper local : charge CSV sinon DBF, puis normalise les colonnes
+        def load_and_normalize(date_, base_name_):
+            df = load_table_any(date_, base_name_)  # essaie .csv puis .dbf
+            if df is None or df.empty:
+                raise FileNotFoundError(
+                    f"Aucun fichier trouvé pour {base_name_} à la date {date_} (.csv ou .dbf)"
+                )
+            df.columns = df.columns.str.strip().str.lower()
+            return df
 
-        # Rechercher les tables correspondantes pour t_conduite.csv et t_cheminement.csv
-        table_conduite_name = f"{export_date}_t_conduite.csv"
-        table_cheminement_name = f"{export_date}_t_cheminement.csv"
+        # ---- chargement (plus d'inspector.has_table sur .csv)
+        conduite_data = load_and_normalize(export_date, 't_conduite')
+        cheminement_data = load_and_normalize(export_date, 't_cheminement')
 
-        # Vérifier l'existence des tables
-        inspector = inspect(engine)
-        if not inspector.has_table(table_conduite_name):
-            return jsonify({"error": f"Table {table_conduite_name} introuvable"}), 404
-        if not inspector.has_table(table_cheminement_name):
-            return jsonify({"error": f"Table {table_cheminement_name} introuvable"}), 404
+        logging.info(f"Colonnes t_conduite : {conduite_data.columns.tolist()}")
+        logging.info(f"Colonnes t_cheminement : {cheminement_data.columns.tolist()}")
 
-        logging.info(f"Nom complet des tables : {table_conduite_name}, {table_cheminement_name}")
-
-        # Charger et analyser les données
-        conduite_data = pd.read_sql(f"SELECT * FROM \"{table_conduite_name}\"", engine)
-        cheminement_data = pd.read_sql(f"SELECT * FROM \"{table_cheminement_name}\"", engine)
-
-        # Normaliser les noms de colonnes pour éviter les erreurs liées à la casse
-        conduite_data.columns = conduite_data.columns.str.lower()
-        cheminement_data.columns = cheminement_data.columns.str.lower()
-
-        logging.info(f"Colonnes disponibles dans t_conduite : {conduite_data.columns.tolist()}")
-        logging.info(f"Colonnes disponibles dans t_cheminement : {cheminement_data.columns.tolist()}")
-
-        # Vérifier si la colonne cm_long existe dans t_cheminement
+        # ---- garde-fous colonnes attendues
         if 'cm_long' not in cheminement_data.columns:
-            logging.error("La colonne 'cm_long' est introuvable dans t_cheminement.csv")
-            return jsonify({"error": "La colonne 'cm_long' est introuvable dans t_cheminement.csv"}), 400
+            return jsonify({"error": "La colonne 'cm_long' est introuvable dans t_cheminement"}), 400
+        if 'cm_codeext' not in cheminement_data.columns:
+            return jsonify({"error": "La colonne 'cm_codeext' est introuvable dans t_cheminement"}), 400
+        if 'cd_prop' not in conduite_data.columns:
+            return jsonify({"error": "La colonne 'cd_prop' est introuvable dans t_conduite"}), 400
 
-        # Analyse des données pour t_conduite
-        logging.info("Analyse des données pour t_conduite")
-        conduite_results = {
+        # ---- normalisations de valeurs
+        cheminement_data['cm_long'] = (
+            cheminement_data['cm_long'].astype(str).str.replace(',', '.', regex=False)
+        )
+        cheminement_data['cm_long'] = pd.to_numeric(cheminement_data['cm_long'], errors='coerce').fillna(0)
+        cheminement_data['cm_codeext'] = cheminement_data['cm_codeext'].astype(str).str.strip().str.upper()
+
+        # ---- analyses
+        results_conduite = pd.DataFrame({
             'Proprietaire': ['DSP Irise', 'Location', 'Total'],
             'Nombre de fourreaux': [
-                len(conduite_data[conduite_data['cd_prop'] == 'OR21']),
-                len(conduite_data[conduite_data['cd_prop'] != 'OR21']),
+                (conduite_data['cd_prop'] == 'OR21').sum(),
+                (conduite_data['cd_prop'] != 'OR21').sum(),
                 len(conduite_data)
             ]
-        }
-        results_conduite = pd.DataFrame(conduite_results)
+        })
 
-        # Analyse des données pour t_cheminement
-        logging.info("Analyse des données pour t_cheminement")
-        cheminement_data['cm_long'] = cheminement_data['cm_long'].astype(str).str.replace(',', '.').astype(float)
-        territoire = cheminement_data['cm_codeext'] == 'TERRITOIRE'
+        territoire = (cheminement_data['cm_codeext'] == 'TERRITOIRE')
         hors_territoire = ~territoire
-        cheminement_results = {
+        results_cheminement = pd.DataFrame({
             'Proprietaire': ['Territoire', 'Hors Territoire', 'Total'],
-            'Nombre de tronçons': [
-                territoire.sum(),
-                hors_territoire.sum(),
-                len(cheminement_data)
-            ],
+            'Nombre de tronçons': [territoire.sum(), hors_territoire.sum(), len(cheminement_data)],
             'Longueur GC en m': [
                 cheminement_data.loc[territoire, 'cm_long'].sum(),
                 cheminement_data.loc[hors_territoire, 'cm_long'].sum(),
                 cheminement_data['cm_long'].sum()
             ]
-        }
-        results_cheminement = pd.DataFrame(cheminement_results)
+        })
 
-        # Vérifiez et créez le répertoire `static/exports` s'il n'existe pas
+        # ---- sauvegardes
         export_dir = os.path.join('static', 'exports')
-        if not os.path.exists(export_dir):
-            os.makedirs(export_dir)
-            logging.info(f"Répertoire créé : {export_dir}")
-
-        # Sauvegarde des résultats
+        os.makedirs(export_dir, exist_ok=True)
         csv_path = os.path.join(export_dir, f"FourreauxGraceTHD_{export_date}.csv")
         html_path = os.path.join(export_dir, f"FourreauxGraceTHD_{export_date}.html")
 
-        with open(csv_path, 'w', newline='') as file:
-            results_conduite.to_csv(file, index=False, sep=';')
-            file.write('\n\n')  # Ajouter des lignes vides entre les deux tableaux
-            results_cheminement.to_csv(file, index=False, sep=';', mode='a')
+        with open(csv_path, 'w', newline='') as f:
+            results_conduite.to_csv(f, index=False, sep=';')
+            f.write('\n\n')
+            results_cheminement.to_csv(f, index=False, sep=';', mode='a')
 
-        with open(html_path, 'w') as file:
-            file.write("<h3>Analyse des Fourreaux - Résultats Conduite</h3>")
-            file.write(results_conduite.to_html(index=False))
-            file.write("<h3>Analyse des Fourreaux - Résultats Cheminement</h3>")
-            file.write(results_cheminement.to_html(index=False))
+        with open(html_path, 'w') as f:
+            f.write("<h3>Analyse des Fourreaux - Résultats Conduite</h3>")
+            f.write(results_conduite.to_html(index=False))
+            f.write("<h3>Analyse des Fourreaux - Résultats Cheminement</h3>")
+            f.write(results_cheminement.to_html(index=False))
 
         logging.info("Analyse des fourreaux terminée avec succès")
 
-        # Retourner les résultats sous forme de JSON
         return jsonify({
             "results_conduite": results_conduite.to_dict(orient='records'),
             "results_cheminement": results_cheminement.to_dict(orient='records'),
@@ -816,6 +948,10 @@ def analyze_fourreaux():
             "html_path": f"/{html_path}"
         })
 
+    except FileNotFoundError as e:
+        # 404 seulement si ni CSV ni DBF
+        logging.error(str(e))
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         logging.error(f"Erreur lors de l'analyse des fourreaux : {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -1310,79 +1446,50 @@ def compare_cheminement():
     try:
         logging.info("Requête reçue pour comparer les Cheminements")
 
-        # Lire les données JSON de la requête
         data = request.get_json()
         old_date = data.get('old_date')
         new_date = data.get('new_date')
-
         if not old_date or not new_date:
-            logging.error("Les deux dates d'export doivent être spécifiées.")
             return jsonify({"error": "Les deux dates d'export doivent être spécifiées."}), 400
 
-        logging.info(f"Dates d'export reçues : Ancien - {old_date}, Nouveau - {new_date}")
+        # --- Chargement avec fallback CSV/DBF
+        old_df = load_table_any(old_date, 't_cheminement')   # essaie .csv, sinon .dbf
+        new_df = load_table_any(new_date, 't_cheminement')   # essaie .csv, sinon .dbf
 
-        # Rechercher les fichiers CSV dans la base
-        old_export = Export.query.filter(Export.export_date == old_date, Export.file_name.ilike('%t_cheminement%.csv')).first()
-        new_export = Export.query.filter(Export.export_date == new_date, Export.file_name.ilike('%t_cheminement%.csv')).first()
-
-        if not old_export or not new_export:
-            logging.error("Fichiers d'export non trouvés pour les dates fournies.")
-            return jsonify({"error": "Fichiers d'export non trouvés pour les dates fournies."}), 404
-
-        logging.info(f"Tables trouvées : {old_export.table_name}, {new_export.table_name}")
-
-        # Charger les tables correspondantes
-        old_table_name = old_export.table_name
-        new_table_name = new_export.table_name
-
-        try:
-            old_df = pd.read_sql(f"SELECT * FROM \"{old_table_name}\"", engine)
-            new_df = pd.read_sql(f"SELECT * FROM \"{new_table_name}\"", engine)
-        except Exception as e:
-            logging.error(f"Erreur lors du chargement des données SQL : {str(e)}")
-            return jsonify({"error": f"Erreur lors du chargement des données : {str(e)}"}), 500
-
-        # Normaliser les colonnes
+        # --- Normalisation colonnes
         old_df.columns = old_df.columns.str.strip().str.lower()
         new_df.columns = new_df.columns.str.strip().str.lower()
 
-        # Journaliser les colonnes disponibles
-        logging.info(f"Colonnes dans l'ancien export : {old_df.columns.tolist()}")
-        logging.info(f"Colonnes dans le nouvel export : {new_df.columns.tolist()}")
-
-        # Vérifier si toutes les colonnes nécessaires existent
-        colonnes_interessantes = ['cm_prop_do', 'cm_codeext', 'cm_long']
-        for col in colonnes_interessantes:
+        # --- Garde-fous colonnes attendues
+        needed = ['cm_code', 'cm_prop_do', 'cm_codeext', 'cm_long']
+        for col in needed:
             if col not in old_df.columns or col not in new_df.columns:
-                logging.error(f"La colonne '{col}' est absente dans l'un des exports.")
                 return jsonify({"error": f"La colonne '{col}' est absente dans l'un des exports."}), 400
 
-        # Vérifier si la colonne `cm_code` existe
-        if 'cm_code' not in old_df.columns or 'cm_code' not in new_df.columns:
-            logging.error("La colonne 'cm_code' est introuvable dans les exports.")
-            return jsonify({"error": "La colonne 'cm_code' est introuvable dans les exports."}), 400
-
-        # Normaliser les données
+        # --- Normalisation valeurs
         def normalize_value(value):
             try:
                 if isinstance(value, str):
-                    value = value.replace(",", ".").strip()  
-                    value = value.strip('"')  
-                if float(value) == int(float(value)):
-                    return int(float(value))
-                return float(value)
-            except (ValueError, TypeError):
+                    # nettoie éventuels guillemets/espaces et virgules décimales
+                    v = value.strip().strip('"').strip("'")
+                    v = v.replace(",", ".")
+                    # tente conversion numérique si possible
+                    if v != "":
+                        f = float(v)
+                        return int(f) if f.is_integer() else f
+                    return ""
+                return value
+            except Exception:
                 return value
 
-        # Normaliser les valeurs de `cm_code`
-        old_df['cm_code'] = old_df['cm_code'].apply(normalize_value).astype(str).str.strip()
-        new_df['cm_code'] = new_df['cm_code'].apply(normalize_value).astype(str).str.strip()
+        old_df['cm_code'] = old_df['cm_code'].astype(str).str.strip()
+        new_df['cm_code'] = new_df['cm_code'].astype(str).str.strip()
 
-        # Identifier les `cm_code` communs
+        # Colonnes à comparer (seuil de 1 m pour cm_long)
+        colonnes_interessantes = ['cm_prop_do', 'cm_codeext', 'cm_long']
+
+        # Comparaison
         common_ids = set(old_df['cm_code']).intersection(set(new_df['cm_code']))
-        logging.info(f"Nombre de cm_code communs : {len(common_ids)}")
-
-        # Comparer les colonnes pour les `cm_code` communs
         diffs = []
         for oid in common_ids:
             row_old = old_df.loc[old_df['cm_code'] == oid, colonnes_interessantes].iloc[0]
@@ -1392,56 +1499,38 @@ def compare_cheminement():
                 val_old = normalize_value(row_old[col])
                 val_new = normalize_value(row_new[col])
 
-                # Vérifier si les deux valeurs sont NaN
                 if pd.isna(val_old) and pd.isna(val_new):
                     continue
 
-                # Gestion des différences
                 if col == 'cm_long' and isinstance(val_old, (int, float)) and isinstance(val_new, (int, float)):
-                    difference = abs(val_old - val_new) 
-                    if difference > 1:  
+                    if abs(val_old - val_new) > 1:
                         diffs.append({
-                            'cm_code': oid,
-                            'Type': 'Modification',
-                            'Attribut': col,
-                            'Valeur N-1': val_old,
-                            'Valeur N': val_new
+                            'cm_code': oid, 'Type': 'Modification',
+                            'Attribut': col, 'Valeur N-1': val_old, 'Valeur N': val_new
                         })
                 elif col != 'cm_long' and val_old != val_new:
-                    # Ajouter une modification pour les autres colonnes si les valeurs diffèrent
                     diffs.append({
-                        'cm_code': oid,
-                        'Type': 'Modification',
-                        'Attribut': col,
-                        'Valeur N-1': val_old,
-                        'Valeur N': val_new
+                        'cm_code': oid, 'Type': 'Modification',
+                        'Attribut': col, 'Valeur N-1': val_old, 'Valeur N': val_new
                     })
 
-        # Identifier les ajouts et suppressions
+        # Ajouts / suppressions
         ajouts = [{'cm_code': normalize_value(code), 'Type': 'Ajout'} for code in set(new_df['cm_code']) - set(old_df['cm_code'])]
         suppressions = [{'cm_code': normalize_value(code), 'Type': 'Suppression'} for code in set(old_df['cm_code']) - set(new_df['cm_code'])]
 
-        # Fusionner toutes les informations
+        # Sorties
         all_results = diffs + ajouts + suppressions
 
-        # Chemins de sauvegarde
         export_dir = os.path.join('static', 'exports')
         os.makedirs(export_dir, exist_ok=True)
-
         csv_path = os.path.join(export_dir, f"CompareCheminement_{old_date}_vs_{new_date}.csv")
         html_path = os.path.join(export_dir, f"CompareCheminement_{old_date}_vs_{new_date}.html")
 
-        # Sauvegarde CSV
         pd.DataFrame(all_results).to_csv(csv_path, index=False, sep=';')
+        with open(html_path, 'w') as f:
+            f.write("<h3>Résultats de la Comparaison</h3>")
+            pd.DataFrame(all_results).to_html(f, index=False)
 
-        # Sauvegarde HTML
-        with open(html_path, 'w') as file:
-            file.write("<h3>Résultats de la Comparaison</h3>")
-            pd.DataFrame(all_results).to_html(file, index=False)
-
-        logging.info("Analyse terminée avec succès")
-
-        # Retourner les résultats au client
         return render_template(
             'compare_result_cheminement.html',
             results=all_results,
@@ -1449,7 +1538,7 @@ def compare_cheminement():
             html_path=f"/{html_path}"
         )
     except Exception as e:
-        logging.error(f"Erreur lors de la comparaison des cheminements : {str(e)}")
+        logging.error(f"Erreur compare_cheminement : {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1548,22 +1637,6 @@ def compare_site_technique():
 
 
 #nouvelles fonctionnalités logiques terrains
-def read_table(export_date: str, suffix_with_ext: str) -> pd.DataFrame:
-    """
-    Charge la table dont le nom est f"{export_date}_{suffix_with_ext}".
-    Si cette table n'existe pas, bascule sur l'autre extension (.csv ↔ .dbf).
-    """
-    table1 = f"{export_date}_{suffix_with_ext}"
-    if suffix_with_ext.lower().endswith('.csv'):
-        table2 = table1[:-4] + '.dbf'
-    else:
-        table2 = table1[:-4] + '.csv'
-
-    try:
-        return pd.read_sql(f'SELECT * FROM "{table1}"', engine)
-    except Exception:
-        return pd.read_sql(f'SELECT * FROM "{table2}"', engine)
-
 
 @app.route('/analyze_t_baie', methods=['POST'])
 def analyze_t_baie():
@@ -2514,77 +2587,92 @@ def analyze_coherence_cable():
         if not export_date:
             return jsonify({"error": "Date d'export non spécifiée"}), 400
 
-        # Noms des tables
-        table_cable = f"{export_date}_t_cable.csv"
-        table_organisme = f"{export_date}_t_organisme.csv"
+        # --- Chargement avec fallback CSV/DBF
+        df_cable = load_table_any(export_date, 't_cable')
+        df_organisme = load_table_any(export_date, 't_organisme')
 
-        # Chargement
-        df_cable = pd.read_sql(f'SELECT * FROM "{table_cable}"', engine)
-        df_organisme = pd.read_sql(f'SELECT * FROM "{table_organisme}"', engine)
-
+        # --- Normalisation colonnes
         df_cable.columns = df_cable.columns.str.lower().str.strip()
         df_organisme.columns = df_organisme.columns.str.lower().str.strip()
 
-        # Nettoyage
+        # --- Nettoyage valeurs
         def clean(val): return str(val).strip().lower()
-
         df_cable = df_cable.applymap(clean)
         df_organisme = df_organisme.applymap(clean)
 
-        # Vérif 1 : cb_prop / cb_gest / cb_user ∈ or_code
+        # --- Vérif 1 : cb_prop / cb_gest / cb_user ∈ or_code
+        if 'or_code' not in df_organisme.columns:
+            return jsonify({"error": "Colonne or_code absente de t_organisme"}), 400
+        for needed in ['cb_prop','cb_gest','cb_user']:
+            if needed not in df_cable.columns:
+                return jsonify({"error": f"Colonne {needed} absente de t_cable"}), 400
+
         or_codes = df_organisme['or_code'].dropna().unique()
         non_trouve_cb_prop = df_cable[~df_cable['cb_prop'].isin(or_codes)]['cb_prop'].dropna().unique().tolist()
         non_trouve_cb_gest = df_cable[~df_cable['cb_gest'].isin(or_codes)]['cb_gest'].dropna().unique().tolist()
         non_trouve_cb_user = df_cable[~df_cable['cb_user'].isin(or_codes)]['cb_user'].dropna().unique().tolist()
 
-        # Vérif 2 : cb_fo_disp + cb_fo_util == cb_capafo
+        # --- Vérif 2 : cb_fo_disp + cb_fo_util == cb_capafo
+        for needed in ['cb_fo_disp','cb_fo_util','cb_capafo']:
+            if needed not in df_cable.columns:
+                return jsonify({"error": f"Colonne {needed} absente de t_cable"}), 400
+
         df_test_fo = df_cable.copy()
-        df_test_fo[['cb_fo_disp', 'cb_fo_util', 'cb_capafo']] = df_test_fo[['cb_fo_disp', 'cb_fo_util', 'cb_capafo']].apply(pd.to_numeric, errors='coerce')
+        df_test_fo[['cb_fo_disp','cb_fo_util','cb_capafo']] = df_test_fo[['cb_fo_disp','cb_fo_util','cb_capafo']].apply(pd.to_numeric, errors='coerce')
         df_test_fo['sum_disp_util'] = df_test_fo['cb_fo_disp'] + df_test_fo['cb_fo_util']
         incoherents_fo = df_test_fo[df_test_fo['sum_disp_util'] != df_test_fo['cb_capafo']]
-        # Préparer les incohérences en HTML
+
+        # HTML rows pour les incohérences
         incoherents_fo_html = ""
         if not incoherents_fo.empty:
             for _, row in incoherents_fo.iterrows():
-                cb_code = row.get('cb_code', 'Inconnu')
-                incoherents_fo_html += f"<tr><td>{cb_code}</td><td>{row['cb_fo_disp']}</td><td>{row['cb_fo_util']}</td><td>{row['cb_capafo']}</td><td>{row['sum_disp_util']}</td></tr>"
+                cb_code = row.get('cb_code', 'inconnu')
+                incoherents_fo_html += (
+                    f"<tr><td>{cb_code}</td>"
+                    f"<td>{row['cb_fo_disp']}</td><td>{row['cb_fo_util']}</td>"
+                    f"<td>{row['cb_capafo']}</td><td>{row['sum_disp_util']}</td></tr>"
+                )
 
+        # --- Vérif 3 : cb_codeext ∈ {territoire, hors territoire}
+        if 'cb_codeext' in df_cable.columns:
+            valid_values = {"territoire", "hors territoire"}
+            cb_codeext_invalides = df_cable[~df_cable['cb_codeext'].isin(valid_values)]
+        else:
+            cb_codeext_invalides = pd.DataFrame()
 
-        # Vérif 3 : cb_codeext in ["territoire", "hors territoire"]
-        valid_values = {"territoire", "hors territoire"}
-        cb_codeext_invalides = df_cable[~df_cable['cb_codeext'].isin(valid_values)]
-
-        # Vérif 4 : unicité de cb_code
-        # Nettoyage explicite cb_code
-        df_cable['cb_code'] = df_cable['cb_code'].astype(str).str.strip().replace({'nan': '', 'none': ''})
+        # --- Vérif 4 : unicité de cb_code
+        if 'cb_code' not in df_cable.columns:
+            return jsonify({"error": "Colonne cb_code absente de t_cable"}), 400
+        df_cable['cb_code'] = df_cable['cb_code'].astype(str).str.strip().replace({'nan':'','none':''})
         total_cb_code = df_cable['cb_code'].dropna().shape[0]
         dup_cb_code = df_cable[df_cable.duplicated('cb_code', keep=False)]
         duplicated_cb_code = dup_cb_code['cb_code'].dropna().unique().tolist()
         cb_code_unique_rate = round((total_cb_code - len(duplicated_cb_code)) / total_cb_code * 100, 2) if total_cb_code else 100
-        # Résultat
+
+        # --- Résultat JSON (+ fichiers)
         result = {
             "status": "success",
             "export_date": export_date,
             "cb_prop_non_trouve": list(map(str, non_trouve_cb_prop)),
             "cb_gest_non_trouve": list(map(str, non_trouve_cb_gest)),
             "cb_user_non_trouve": list(map(str, non_trouve_cb_user)),
-            "nb_incoherents_fo": len(incoherents_fo),
-            "nb_cb_codeext_invalides": cb_codeext_invalides.shape[0],
+            "nb_incoherents_fo": int(len(incoherents_fo)),
+            "nb_cb_codeext_invalides": int(cb_codeext_invalides.shape[0]),
             "incoherents_fo_html": incoherents_fo_html,
-            "total_cb_code": total_cb_code,
+            "total_cb_code": int(total_cb_code),
             "cb_code_unique_rate": cb_code_unique_rate,
             "duplicated_cb_code": duplicated_cb_code
-
         }
 
-        # Export
         export_dir = os.path.join("static", "exports")
         os.makedirs(export_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
         csv_filename = f"Analyse_Cable_{export_date}_{timestamp}.csv"
+        html_filename = f"Analyse_Cable_{export_date}_{timestamp}.html"
         csv_path = os.path.join(export_dir, csv_filename)
+        html_path = os.path.join(export_dir, html_filename)
 
+        # CSV
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f, delimiter=';')
             writer.writerow(["Analyse de coherence du câble", export_date])
@@ -2609,89 +2697,62 @@ def analyze_coherence_cable():
             writer.writerow(["Taux unique (%)", f"{cb_code_unique_rate}%"])
             writer.writerow(["Doublons (max 10)", ", ".join(duplicated_cb_code[:10]) or "Aucun"])
 
-
         # HTML
-        html_filename = f"Analyse_Cable_{export_date}_{timestamp}.html"
-        html_path = os.path.join(export_dir, html_filename)
-
         def html_voir_plus(liste):
             if not liste:
                 return "Aucune"
             html = ", ".join(liste[:10])
             if len(liste) > 10:
-                html += f"""<span class="voir-plus" onclick="this.nextElementSibling.style.display='inline'; this.style.display='none';">... Voir plus</span>
-                <span style="display:none;">, {', '.join(liste[10:])}</span>"""
+                html += (
+                    "<span class=\"voir-plus\" onclick=\"this.nextElementSibling.style.display='inline'; this.style.display='none';\">... Voir plus</span>"
+                    f"<span style=\"display:none;\">, {', '.join(liste[10:])}</span>"
+                )
             return html
 
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Analyse câble - {export_date}</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        table {{ border-collapse: collapse; width: 100%; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; }}
-        th {{ background-color: #f2f2f2; }}
-        tr:nth-child(even) {{ background-color: #f9f9f9; }}
-        .voir-plus {{ color: blue; cursor: pointer; text-decoration: underline; }}
-    </style>
-</head>
-<body>
-    <h1>Analyse de la table câble – {export_date}</h1>
+<html><head><meta charset="UTF-8"><title>Analyse câble - {export_date}</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 20px; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border: 1px solid #ddd; padding: 8px; }}
+th {{ background-color: #f2f2f2; }}
+tr:nth-child(even) {{ background-color: #f9f9f9; }}
+.voir-plus {{ color: blue; cursor: pointer; text-decoration: underline; }}
+</style></head><body>
+<h1>Analyse de la table câble – {export_date}</h1>
 
-    <h2>1. cb_prop / cb_gest / cb_user non trouvés dans or_code</h2>
-    <table>
-        <tr><th>Champ</th><th>Codes non trouvés</th></tr>
-        <tr><td>cb_prop</td><td>{html_voir_plus(result["cb_prop_non_trouve"])}</td></tr>
-        <tr><td>cb_gest</td><td>{html_voir_plus(result["cb_gest_non_trouve"])}</td></tr>
-        <tr><td>cb_user</td><td>{html_voir_plus(result["cb_user_non_trouve"])}</td></tr>
-    </table>
+<h2>1. cb_prop / cb_gest / cb_user non trouvés dans or_code</h2>
+<table>
+<tr><th>Champ</th><th>Codes non trouvés</th></tr>
+<tr><td>cb_prop</td><td>{html_voir_plus(result["cb_prop_non_trouve"])}</td></tr>
+<tr><td>cb_gest</td><td>{html_voir_plus(result["cb_gest_non_trouve"])}</td></tr>
+<tr><td>cb_user</td><td>{html_voir_plus(result["cb_user_non_trouve"])}</td></tr>
+</table>
 
-    <h2>2. Incohérences cb_fo_disp + cb_fo_util ≠ cb_capafo</h2>
-    <p>Nombre de lignes incohérentes : <strong>{result["nb_incoherents_fo"]}</strong></p>
-    <table>
-        <thead>
-            <tr>
-                <th>cb_code</th>
-                <th>cb_fo_disp</th>
-                <th>cb_fo_util</th>
-                <th>cb_capafo</th>
-                <th>Somme disp+util</th>
-            </tr>
-        </thead>
-        <tbody>
-            {result["incoherents_fo_html"]}
-        </tbody>
-    </table>
+<h2>2. Incohérences cb_fo_disp + cb_fo_util ≠ cb_capafo</h2>
+<p>Nombre de lignes incohérentes : <strong>{result["nb_incoherents_fo"]}</strong></p>
+<table>
+<thead><tr>
+<th>cb_code</th><th>cb_fo_disp</th><th>cb_fo_util</th><th>cb_capafo</th><th>Somme disp+util</th>
+</tr></thead><tbody>{result["incoherents_fo_html"]}</tbody></table>
 
-    <h2>3. Valeurs incorrectes dans cb_codeext</h2>
-    <p>Nombre de lignes avec cb_codeext invalide : <strong>{result["nb_cb_codeext_invalides"]}</strong></p>
+<h2>3. Valeurs incorrectes dans cb_codeext</h2>
+<p>Nombre de lignes avec cb_codeext invalide : <strong>{result["nb_cb_codeext_invalides"]}</strong></p>
 
-    <h2>4. Unicité de cb_code</h2>
-    <table>
-        <tr><th>Total</th><th>Taux (%)</th><th>Doublons</th></tr>
-        <tr>
-            <td>{total_cb_code}</td>
-            <td>{cb_code_unique_rate}%</td>
-            <td>{html_voir_plus(duplicated_cb_code)}</td>
-        </tr>
-    </table>
-</body>
-</html>""")
+<h2>4. Unicité de cb_code</h2>
+<table>
+<tr><th>Total</th><th>Taux (%)</th><th>Doublons</th></tr>
+<tr><td>{total_cb_code}</td><td>{cb_code_unique_rate}%</td><td>{html_voir_plus(duplicated_cb_code)}</td></tr>
+</table>
+</body></html>""")
 
         result["csv_path"] = f"/static/exports/{csv_filename}"
         result["html_path"] = f"/static/exports/{html_filename}"
-
         return jsonify(result)
 
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        return jsonify({"status": "error", "message": str(e), "traceback": traceback.format_exc()}), 500
 
 
 #cohérence table t_conduite
@@ -4825,7 +4886,7 @@ def analyze_all():
 
     for name, endpoint in route_map.items():
         try:
-            resp = requests.post(f"http://127.0.0.1:5000{endpoint}", json={"export_date": export_date})
+            resp = requests.post(f"{APP_BASE_URL}{endpoint}", json={"export_date": export_date})
             if resp.ok:
                 data = resp.json()
                 for path in [data.get("csv_path"), data.get("html_path")]:
@@ -4847,6 +4908,7 @@ def analyze_all():
         "status": "ok",
         "zip_path": f"/{zip_path}"
     })
+
 
 @app.route('/liste_exports', methods=['GET'])
 def liste_exports():
@@ -4883,6 +4945,7 @@ def liste_exports():
         return jsonify({"error": str(e)}), 500
 
 
+
 @app.route('/resilience')
 def resilience():
     return render_template('resilience.html')
@@ -4909,7 +4972,6 @@ def upload_resilience():
                 gdf = gpd.read_file(filepath)
                 gdf = gdf.to_crs(epsg=2154)
                 with engine.begin() as conn:
-                    conn.execute(text("SET search_path TO resilience, public"))
                     gdf.to_postgis(name, conn, schema="resilience", if_exists="replace", index=False)
             except Exception as e:
                 return jsonify({'status': 'error', 'message': f'Erreur traitement {file.filename} : {str(e)}'})
@@ -4921,18 +4983,20 @@ def upload_resilience():
 @app.route('/resilience_layers')
 def get_resilience_layers():
     with engine.connect() as conn:
-        # Tables
+        # Tables et vues (hors préfixe alea)
         result1 = conn.execute(text("""
             SELECT table_name 
             FROM information_schema.tables
             WHERE table_schema = 'resilience'
-              AND table_type IN ('BASE TABLE', 'VIEW');
+              AND table_type IN ('BASE TABLE', 'VIEW')
+              AND table_name NOT LIKE 'alea%';
         """))
         tables = [row[0] for row in result1]
 
-        # Vues matérialisées
+        # Vues matérialisées (on prend tout)
         result2 = conn.execute(text("""
-            SELECT matviewname FROM pg_matviews
+            SELECT matviewname 
+            FROM pg_matviews
             WHERE schemaname = 'resilience';
         """))
         matviews = [row[0] for row in result2]
@@ -4945,39 +5009,81 @@ def get_resilience_layers():
 @app.route('/create_resilience_view', methods=['POST'])
 def create_resilience_view():
     data = request.json
-    table_a = data.get('table_a')
-    table_b = data.get('table_b')
+    main_table = data.get('main_table')
+    alea_tables = data.get('alea_tables', [])
     view_name = data.get('view_name', 'vue_resilience')
+    preview_only = data.get('preview_only', False)
+
+    if not main_table or not alea_tables or not isinstance(alea_tables, list):
+        return jsonify({'status': 'error', 'message': 'Table principale ou couches alea manquantes.'})
+
+    # Récupère la liste des colonnes de la table principale
+    with engine.begin() as conn:
+        result = conn.execute(text(f'''
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'resilience' AND table_name = :main_table
+        '''), {'main_table': main_table})
+        main_columns = set([row[0] for row in result])
+
+    select_fields = ['row_number() OVER () AS id_unique', 'p.*']
+    join_clauses = []
+    for i, alea_table in enumerate(alea_tables):
+        alias = f'a{i+1}'
+        target_col = alea_table  # nom qu'on veut donner à la colonne résultante
+        # Ne rajoute l'alias QUE SI pas déjà dans la table principale
+        if target_col not in main_columns:
+            select_fields.append(f'{alias}.alea AS {target_col}')
+        join_clauses.append(f'LEFT JOIN "{alea_table}" {alias} ON ST_Intersects({alias}.geometry, p.geometry)')
+
+    sql = f'''
+        DROP MATERIALIZED VIEW IF EXISTS resilience."{view_name}";
+        CREATE MATERIALIZED VIEW resilience."{view_name}" AS
+        SELECT {', '.join(select_fields)}
+        FROM resilience."{main_table}" p
+        {' '.join(join_clauses)};
+    '''
+
+
+    if preview_only:
+        aleas_desc = ', '.join([f'la couche de support "{a}" (valeur de l’aléa)' for a in alea_tables])
+        description = (
+            f'La vue matérialisée "{view_name}" croisera la couche principale "{main_table}" '
+            f'(toutes ses colonnes) avec {aleas_desc}.<br>'
+            "Pour chaque entité de la table principale, la vue ajoutera une colonne pour chaque aléa sélectionné, "
+            "indiquant la valeur d’aléa si elle croise spatialement cette entité (ou NULL sinon).<br>"
+            "Chaque ligne de la vue représente une entité de la couche principale enrichie de ses risques."
+        )
+        return jsonify({
+            'status': 'preview',
+            'sql': sql,
+            'dependencies': [main_table] + alea_tables,
+            'description': description,
+        })
+
+
 
     try:
         with engine.begin() as conn:
-            conn.execute(text("SET search_path TO resilience, public"))
-            conn.execute(text(f"""
-                DROP MATERIALIZED VIEW IF EXISTS "{view_name}";
-                CREATE SEQUENCE IF NOT EXISTS si_slr START 1;
-                CREATE MATERIALIZED VIEW "{view_name}" AS
-                SELECT DISTINCT ON (a.id)
-                    nextval('si_slr') AS fid,
-                    a.geometry,
-                    a.id,
-                    b.alea_inondation
-                FROM "{table_a}" a
-                LEFT JOIN "{table_b}" b
-                    ON ST_Intersects(a.geometry, b.geometry)
-                ORDER BY a.id, fid;
-            """))
-        return jsonify({'status': 'ok', 'view': view_name})
+            conn.execute(text(sql))
+            return jsonify({
+            'status': 'ok',
+            'view': view_name,
+            'dependencies': [main_table] + alea_tables,
+            'sql': sql,
+            'description': f'Vue matérialisée créée à partir de {main_table} et des couches alea {alea_tables}.'
+        })
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)})
+        return jsonify({'status': 'error', 'message': str(e), 'sql': sql})
 
-# Route pour charger une couche spécifique
+
+# Route pour charger une couche spécifique renvoie seulement les couches principales (sans préfixe alea)
 @app.route('/resilience_layer_data/<layer_name>')
 def get_resilience_layer_data(layer_name):
     try:
         with engine.begin() as conn:
-            conn.execute(text("SET search_path TO resilience, public"))
+
             gdf = gpd.read_postgis(f'SELECT * FROM "{layer_name}"', con=conn, geom_col='geometry')
-        gdf = gdf.to_crs(epsg=4326)
+            gdf = gdf.to_crs(epsg=4326)
         
         # 🔧 Nettoyer les NaN
         gdf_clean = gdf.copy()
@@ -4995,10 +5101,26 @@ def get_resilience_layer_data(layer_name):
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
 
+
+# Couches supports (prefixe alea)
+@app.route('/resilience_layers_support')
+def get_resilience_layers_support():
+    with engine.begin() as conn:
+        result = conn.execute(text("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'resilience'
+              AND table_type IN ('BASE TABLE', 'VIEW')
+              AND table_name LIKE 'alea%';
+        """))
+        alea_tables = [row[0] for row in result]
+    return jsonify(sorted(alea_tables))
+
+
 #dependance    
 @app.route('/resilience_dependencies/<layer>')
 def resilience_dependencies(layer):
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         result = conn.execute(text(f"""
             SELECT matviewname FROM pg_matviews
             WHERE schemaname = 'resilience'
@@ -5006,6 +5128,7 @@ def resilience_dependencies(layer):
         """))
         deps = [row[0] for row in result]
     return jsonify({"dependencies": deps})
+
 
 # route de suppression d'une couche
 @app.route('/delete_resilience_layer', methods=['POST'])
@@ -5033,6 +5156,8 @@ def delete_resilience_layer():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
+
+# route de téléchargement d'une couche
 @app.route('/download_resilience_layer/<layer>')
 def download_resilience_layer(layer):
     format = request.args.get('format', 'csv')
@@ -5058,3 +5183,4 @@ def download_resilience_layer(layer):
 
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+

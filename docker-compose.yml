@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    container_name: telecom_db
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
+      POSTGRES_DB: ${DB_NAME:-telecom_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persistent PG data
+      - db_data:/var/lib/postgresql/data
+      # First-run initialization scripts (SQL run automatically on empty volume)
+      - ./db/init:/docker-entrypoint-initdb.d
+      # A convenient import folder you can use later with restore scripts
+      - ./db/import:/import
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:8.13
+    container_name: telecom_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telecom_web
+    # Use your .env for secrets and DB config
+    env_file:
+      - .env
+    environment:
+      # Override host/port in Docker
+      DB_HOST: db
+      DB_PORT: 5432
+      # Optional: enable the in-UI reset link logic already present in your app
+      RESET_LINK_VIA_UI: ${RESET_LINK_VIA_UI:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist and share user-uploaded data & temp processing files
+      - ./uploads:/app/uploads
+      - ./temp_shapefiles:/app/temp_shapefiles
+      - ./static:/app/static
+    command: gunicorn -w 3 -b 0.0.0.0:8000 app:app
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  pgadmin_data:

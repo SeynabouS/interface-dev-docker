@@ -450,6 +450,7 @@ a.download-btn:hover {
     font-size: 1rem;
     cursor: pointer;
     transition: background 0.3s ease;
+    
 }
 
 .accordion-toggle:hover {
@@ -468,4 +469,84 @@ a.download-btn:hover {
 .export-history-panel.open {
     max-height: 300px;
     padding: 10px;
+}
+
+/* Styles pour les icônes d'information */
+.info-icon {
+    display: inline-block;
+    margin-left: 8px;
+    width: 18px;
+    height: 18px;
+    background-color: #005aa3;
+    color: white;
+    border-radius: 50%;
+    text-align: center;
+    font-style: normal;
+    font-size: 12px;
+    line-height: 18px;
+    font-weight: bold;
+    cursor: help;
+    transition: all 0.3s ease;
+}
+
+button:hover .info-icon {
+    background-color: white;
+    color: #005aa3;
+}
+
+.btn-with-tooltip::after {
+  /* structure + position */
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 0.5em);
+  transform: translateX(-50%);
+  display: block;
+  width: 550px;
+  max-height: 200px;
+  overflow-y: auto;
+  
+  /* pré‐servations des espaces et retours */
+  white-space: pre-wrap;
+  word-break: break-word;
+  
+  /* style */
+  background: rgba(0,0,0,0.85);
+  color: #fff;
+  padding: 0.6em 0.8em;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  text-align: left;      /* aligné à gauche */
+  font-weight: normal;
+  text-transform: none;  /* conserve la casse */
+  
+  /* apparition */
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .2s, visibility .2s;
+  z-index: 1000;
+  pointer-events: auto;
+  overscroll-behavior: contain;
+}
+
+/* petit triangle */
+.btn-with-tooltip::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: rgba(0,0,0,0.85);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .2s, visibility .2s;
+  z-index: 1000;
+}
+
+.btn-with-tooltip:hover::after,
+.btn-with-tooltip:hover::before {
+  opacity: 1;
+  visibility: visible;
 }

@@ -28,8 +28,8 @@ function updateFileList(event, type) {
 
 // Function to upload the files via AJAX
 function uploadFiles(type) {
-    console.log(`Tentative d'importation pour le type: ${type}`); // Debug
-    
+    console.log(`Tentative d'importation pour le type: ${type}`);
+
     const fileInput = document.getElementById(`file-input-${type}`);
     const uploadButton = document.getElementById(`upload-btn-${type}`);
     const loadingIndicator = document.getElementById(`loading-indicator-${type}`);
@@ -55,36 +55,53 @@ function uploadFiles(type) {
         alert("Veuillez entrer une date d'exportation.");
         return;
     }
-
     formData.append('export_date', exportDate);
 
-    // Désactiver le bouton et afficher le chargement
     uploadButton.disabled = true;
     loadingIndicator.style.display = 'inline';
 
-    // Effectuer la requête AJAX
     fetch('/upload', {
         method: 'POST',
-        body: formData
+        body: formData,
+        credentials: 'same-origin' // utile si une auth/CSRf existe
     })
-    .then(response => {
-        if (!response.ok) {
-            return response.json().then(err => {
-                throw new Error(`Erreur serveur: ${err.message}`);
-            });
+    .then(async (response) => {
+        const ct = response.headers.get('content-type') || '';
+        console.log('Réponse upload:', response.status, response.statusText, ct);
+
+        // Détecte une redirection (souvent vers login)
+        if (response.redirected) {
+            const dest = response.url;
+            const text = await response.text().catch(() => '');
+            throw new Error(`Redirection vers ${dest}. Êtes-vous authentifié ?\n${text.slice(0,200)}…`);
         }
-        return response.json();
+
+        // Essaie JSON sinon fallback texte
+        let body;
+        if (ct.includes('application/json')) {
+            body = await response.json().catch(() => null);
+        } else {
+            body = await response.text().catch(() => '');
+        }
+
+        if (!response.ok) {
+            const msg = (body && typeof body === 'object')
+                ? (body.message || JSON.stringify(body))
+                : `HTTP ${response.status} ${response.statusText} — ${String(body).slice(0,200)}…`;
+            throw new Error(msg);
+        }
+
+        return body;
     })
-    .then(data => {
+    .then((data) => {
         console.log('Upload success:', data);
-        alert('Upload réussi');
+        alert((data && data.message) ? data.message : 'Upload réussi');
     })
-    .catch(error => {
-        console.error('Erreur lors de l\'upload des fichiers:', error);
+    .catch((error) => {
+        console.error("Erreur lors de l'upload des fichiers:", error);
         alert('Erreur lors de l\'upload: ' + error.message);
     })
     .finally(() => {
-        // Réactiver le bouton et cacher le chargement
         uploadButton.disabled = false;
         loadingIndicator.style.display = 'none';
     });

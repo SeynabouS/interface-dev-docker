@@ -1,7 +1,0 @@
-Analyse de t_cassette;2024-03
-
-Unicité;Taux d'unicité cs_bp_code;Taux d'unicité cs_rf_code
-;96.04%;100.0%
-Correspondances;Succès cs_bp_code→t_ebp;Succès cs_rf_code→t_reference
-;0.0%;100.0%
-Codes vides;0;0
