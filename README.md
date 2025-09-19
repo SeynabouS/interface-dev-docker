@@ -151,6 +151,11 @@ Toujours sur la page principale :
   - **Fourreaux** (`analyze_fourreaux`)  
 - Chaque analyse génère des **HTML/CSV** déposés dans `static/results/` (avec liens de téléchargement depuis l’UI).
 
+### Analyses logiques — Référentiels & cohérences
+`t_baie`, `t_cab_cond`, `t_cassette`, `t_cheminement`, `t_cond_chem`, cohérence câble,  
+`t_conduite → t_organisme`, `t_ebp`, `t_fibre → t_cable`, `position`, `t_ltech`,  
+`p_ptech`, `t_ropt`, `t_sitetech`, `t_suf`, `t_tiroir`, `t_cableline`, `t_noeud`
+
 ### Comparer deux exports
 1. **Importer la 2ᵉ version** via le formulaire “Comparaison” (`/upload_different_version`).  
 2. Lancer :  
