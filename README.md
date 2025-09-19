@@ -3,7 +3,7 @@
 
 Salut Romain 👋  
 Voici tout ce qu’il te faut pour **cloner, lancer et tester** l’appli localement.  
-L’objectif : importer un export (lot de fichiers), le stocker en base **PostgreSQL/PostGIS**, lancer des **analyses qualité/cohérence** et afficher des résultats (HTML/CSV). Une page dédiée **“Résilience Réseau”** permet aussi d’importer des couches SIG et de les afficher sur une carte (Leaflet).
+Cette application Flask permet d'analyser des exports de données de réseaux télécoms, de les stocker dans une base PostgreSQL, d'effectuer des vérifications de cohérence, et propose désormais une interface dédiée à la résilience du réseau
 
 ---
 
@@ -54,7 +54,6 @@ PGADMIN_DEFAULT_PASSWORD=admin
 # Option dev : affiche le lien de réinit de mot de passe dans l’UI
 RESET_LINK_VIA_UI=1
 
-
 DB_HOST et DB_PORT sont déjà gérés par Docker (db:5432).
 
 ▶️ Démarrage rapide (TL;DR)
@@ -70,12 +69,11 @@ curl http://localhost:8000/healthz   # doit renvoyer {"status":"ok","db":true}
 # 3) Créer un utilisateur pour se connecter à l’UI
 docker compose exec web python create_user.py admin admin123
 
-🔁 Restaurer le backup (OBLIGATOIRE actuellement)
+# 🔁 Restaurer le backup (OBLIGATOIRE actuellement)
 
 L’upload sur Interface est HS. Restaure le dump fourni (présent dans db/import/).
 
 docker compose exec db bash -lc "pg_restore --clean --if-exists --no-owner --no-acl -f - /import/gracethd.backup | psql -U app -v ON_ERROR_STOP=1 -d telecom_db"
-
 
 Ensuite, ouvre l’UI : http://localhost:8000
 
@@ -84,7 +82,7 @@ Identifiants : admin / admin123
 Repartir d’une base vierge :
 docker compose down -v && docker compose up -d --build
 
-🗂️ Structure utile du projet
+# 🗂️ Structure utile du projet
 interface-dev-docker/
 ├─ app.py                         # App Flask (routes, analyses, import, auth)
 ├─ Dockerfile                     # Image du service web
@@ -109,12 +107,11 @@ interface-dev-docker/
 ├─ uploads/                       # Fichiers importés (HS pour l’instant)
 └─ temp_shapefiles/               # Temporaires SIG
 
-🔐 Authentification
+# 🔐 Authentification
 
 Créer un utilisateur :
 
 docker compose exec web python create_user.py <login> <motdepasse>
-
 
 Réinitialiser : menu “Mot de passe oublié” (/forgot)
 
@@ -124,7 +121,7 @@ Sinon, récupérer le lien :
 
 docker compose logs -f web | grep RESET
 
-📥 Importer un export (jeu de fichiers)
+# 📥 Importer un export (jeu de fichiers)
 
 Se connecter à l’UI → “Analyse d’un Export à une Date Donnée”
 
@@ -141,7 +138,7 @@ Les tables sont créées dans gracethd avec le nom : YYYY-MM-DD_nomFichier.ext
 
 Actuellement l’upload est HS. Utiliser la restauration du backup (section ci-dessus) pour tester les analyses.
 
-🔎 Lancer des analyses
+# 🔎 Lancer des analyses
 
 Toujours sur la page principale :
 
@@ -197,7 +194,7 @@ Healthcheck : GET http://localhost:8000/healthz → {"status":"ok","db":true}
 
 Résultats : servis depuis static/results/
 
-🐛 Dépannage
+# 🐛 Dépannage
 
 Uploads (Interface) → 500 + “Unexpected token '<' … not valid JSON” (page HTML renvoyée au lieu du JSON)
 
@@ -211,11 +208,9 @@ Logs :
 
 docker compose logs -f web
 
-
 Repartir propre :
 
 docker compose down -v && docker compose up -d --build
-
 
 Port occupé : modifier ports: dans docker-compose.yml (ex. 8080:8000)
 
@@ -228,13 +223,7 @@ docker compose down
 # Tout supprimer (y compris les volumes -> DB réinitialisée)
 docker compose down -v
 
-🔒 Notes sécurité (local)
-
-Le SECRET_KEY et les mots de passe de démo ne sont pas faits pour la prod
-
-En environnement partagé, change-les
-
-🙋‍♀️ Besoin d’aide ?
+# 🙋‍♀️ Besoin d’aide ?
 
 Tu peux me ping si quelque chose ne tourne pas rond.
 Bon test ! 🚀
