@@ -162,10 +162,10 @@ Toujours sur la page principale :
 
 ---
 
-## 🗺️ Page “Résilience Réseau” (SIG)
+## 🗺️ Page “Résilience Réseau”
 
 - Accès : bouton **“Résilience Réseau”** depuis la page principale.  
-- Objectif : **importer des couches** (CSV/DBF/SHP…) dans le schéma `resilience`, puis les **afficher sur une carte** (Leaflet).  
+- Objectif : **importer des couches** importer des couches gesospatiales  dans le schéma `resilience`, puis les **afficher sur une carte et trouver leur alea de relisilience** (Leaflet).  
 - Fonctions côté UI : affichage/masquage par couche, suppression, coloration, etc.  
 - Les fichiers temporaires passent par `temp_shapefiles/` côté conteneur web.
 
@@ -208,7 +208,8 @@ scripts/restore.sh <nom.dump|nom.sql>
 
 - **Port occupé** : change le port mappé dans `docker-compose.yml` (ex. `8080:8000`).
 
-- **pgAdmin (optionnel)** : si un service pgAdmin est configuré dans `docker-compose.yml`, connecte‑toi avec les variables `PGADMIN_DEFAULT_*` de ton `.env`. Crée une connexion vers l’hôte `db` (port `5432`).
+- **pgAdmin** : si un service pgAdmin est configuré dans `docker-compose.yml`, connecte‑toi avec les variables `PGADMIN_DEFAULT_*` de ton `.env`. Crée une connexion vers l’hôte `db` (port `5432`).
+
 
 ---
 
@@ -222,14 +223,6 @@ docker compose down
 docker compose down -v
 ```
 
----
-
-## 🔒 Notes sécurité (local)
-
-- Le `SECRET_KEY` et les mots de passe de démo **ne sont pas faits pour la prod**.  
-- En local, on garde les valeurs par défaut pour aller vite. En environnement partagé, **change-les**.
-
----
 🙋‍♀️ Besoin d’aide ?
 
 Tu peux me ping si quelque chose ne tourne pas rond.
