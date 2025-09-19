@@ -32,14 +32,12 @@ Docker Desktop (ou Docker Engine) + Docker Compose v2
 Ports libres : 8000 (appli) et 5432 (PostgreSQL)
 
 ⚙️ Configuration
-
-Cloner le dépôt
-
+1) Cloner le dépôt
 git clone <URL_DU_REPO> interface-dev-docker
 cd interface-dev-docker
 
+2) Variables d’environnement
 
-Variables d’environnement
 Copier l’exemple, puis adapter si besoin :
 
 cp .env.docker.example .env
@@ -92,11 +90,12 @@ docker compose exec db bash -lc 'psql -U "$DB_USERNAME" -d "$DB_NAME" -f /import
 
 Le dossier du dépôt ./db/import/ est monté dans le conteneur à /import (cf. docker-compose.yml).
 
-Ensuite, ouvrir l’UI :
-http://localhost:8000
- (identifiants de test : admin / admin123)
+Ensuite, ouvrir l’UI : http://localhost:8000
+
+Identifiants de test : admin / admin123
 
 💡 Repartir d’une base vierge :
+
 docker compose down -v && docker compose up -d --build
 
 🗺️ Pages & fonctionnalités
@@ -146,10 +145,7 @@ docker compose exec web python create_user.py <login> <motdepasse>
 
 Réinitialiser via “Mot de passe oublié” (/forgot) :
 
-si RESET_LINK_VIA_UI=1, le lien s’affiche dans l’UI et dans les logs,
-
-sinon, le récupérer dans les logs :
-
+# Si RESET_LINK_VIA_UI=1, le lien s’affiche dans l’UI et dans les logs
 docker compose logs -f web | grep RESET
 
 🗂️ Arborescence (résumé)
