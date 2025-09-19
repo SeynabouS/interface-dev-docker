@@ -33,7 +33,7 @@ Ports libres : 8000 (appli) et 5432 (PostgreSQL)
 
 ⚙️ Configuration
 1) Cloner le dépôt
-git clone <URL_DU_REPO> interface-dev-docker
+git clone https://github.com/SeynabouS/interface-dev-docker.git
 cd interface-dev-docker
 
 2) Variables d’environnement
@@ -220,3 +220,11 @@ Changez-les pour tout environnement partagé.
 
 Pour toute question, ping moi directement.
 Bon test ! 🚀
+
+Si ça s’affiche encore mal :
+
+vérifie que le fichier s’appelle README.md,
+
+colle directement dans l’éditeur GitHub (pas depuis Word/Teams),
+
+utilise Preview pour valider le rendu.
