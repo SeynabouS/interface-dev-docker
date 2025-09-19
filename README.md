@@ -1,5 +1,5 @@
 
-# Le Moot — Interface d’Analyse Réseau (Flask + PostGIS + Docker)
+# Interface d’Analyse Réseau (Flask + PostGIS + Docker)
 
 Salut Romain 👋  
 Voici tout ce qu’il te faut pour **cloner, lancer et tester** l’appli localement.  
@@ -238,5 +238,3 @@ En environnement partagé, change-les
 
 Tu peux me ping si quelque chose ne tourne pas rond.
 Bon test ! 🚀
-
-ChatGPT peut commettre des erreurs. Il est
