@@ -27,8 +27,8 @@ Ports libres : 8000 (appli) et 5432 (PostgreSQL)
 
 1) **Cloner le dépôt**  
 ```bash
-git clone <URL_DU_REPO> le-moot
-cd le-moot/interface-local
+git clone https://github.com/SeynabouS/interface-dev-docker.git
+cd nterface-dev-docker
 ```
 
 2) **Variables d’environnement**  
