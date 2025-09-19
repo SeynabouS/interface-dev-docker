@@ -55,17 +55,14 @@ RESET_LINK_VIA_UI=1
 > **DB_HOST** et **DB_PORT** sont déjà gérés par Docker (`db:5432`).
 
 
-# pgAdmin est activé dans docker-compose pour vérifier la base et l’import
+pgAdmin est activé dans docker-compose pour vérifier la base et l’import
 PGADMIN_DEFAULT_EMAIL=admin@example.com
 PGADMIN_DEFAULT_PASSWORD=admin
 
 # Option dev : affiche le lien de réinit de mot de passe dans l’UI
 RESET_LINK_VIA_UI=1
 
-
-DB_HOST et DB_PORT sont déjà gérés par Docker (db:5432).
-
-# ▶️ Démarrage rapide (TL;DR)
+▶️ Démarrage rapide (TL;DR)
 
 Dans le dossier interface-dev-docker/ :
 
@@ -78,11 +75,12 @@ curl http://localhost:8000/healthz   # doit renvoyer {"status":"ok","db":true}
 # 3) Créer un utilisateur pour se connecter à l’UI
 docker compose exec web python create_user.py admin admin123
 
-# 🔁 Restaurer le backup (OBLIGATOIRE actuellement)
+🔁 Restaurer le backup (OBLIGATOIRE actuellement)
 
 L’upload sur Interface est HS. Restaure le dump fourni (présent dans db/import/).
 
 docker compose exec db bash -lc "pg_restore --clean --if-exists --no-owner --no-acl -f - /import/gracethd.backup | psql -U app -v ON_ERROR_STOP=1 -d telecom_db"
+
 
 Ensuite, ouvre l’UI : http://localhost:8000
 
