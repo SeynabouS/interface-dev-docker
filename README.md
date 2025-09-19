@@ -7,7 +7,7 @@ Cette application Flask permet d'analyser des exports de données de réseaux t�
 
 ---
 
-## 🧱 Stack & services
+# 🧱 Stack & services
 
 - **Backend** : Flask (Python 3.11), SQLAlchemy, GeoAlchemy2
 - **DB** : PostgreSQL + **PostGIS**
@@ -107,7 +107,7 @@ interface-dev-docker/
 ├─ uploads/                       # Fichiers importés (HS pour l’instant)
 └─ temp_shapefiles/               # Temporaires SIG
 
-# 🔐 Authentification
+🔐 Authentification
 
 Créer un utilisateur :
 
@@ -194,7 +194,7 @@ Healthcheck : GET http://localhost:8000/healthz → {"status":"ok","db":true}
 
 Résultats : servis depuis static/results/
 
-# 🐛 Dépannage
+🐛 Dépannage
 
 Uploads (Interface) → 500 + “Unexpected token '<' … not valid JSON” (page HTML renvoyée au lieu du JSON)
 
@@ -223,7 +223,7 @@ docker compose down
 # Tout supprimer (y compris les volumes -> DB réinitialisée)
 docker compose down -v
 
-# 🙋‍♀️ Besoin d’aide ?
+🙋‍♀️ Besoin d’aide ?
 
 Tu peux me ping si quelque chose ne tourne pas rond.
 Bon test ! 🚀
