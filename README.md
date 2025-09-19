@@ -83,8 +83,10 @@ Identifiants : admin / admin123
 Repartir d’une base vierge :
 docker compose down -v && docker compose up -d --build
 
-# 🗂️ Structure utile du projet
-interface-dev-docker/
+## 🗂️ Structure utile du projet
+
+```
+interface-local/
 ├─ app.py                         # App Flask (routes, analyses, import, auth)
 ├─ Dockerfile                     # Image du service web
 ├─ docker-compose.yml             # Services : db (PostGIS) + web (Flask)
@@ -92,22 +94,22 @@ interface-dev-docker/
 ├─ .env.docker.example            # Exemple d’env
 ├─ db/
 │  ├─ init/00_init_postgis.sql    # Création PostGIS + schémas gracethd/resilience
-│  └─ import/                     # ⬅️ backup .backup (monté en /import dans le conteneur)
+│  └─ import/                     # (Option) dumps à restaurer
 ├─ scripts/
 │  ├─ dump.sh                     # Sauvegarde DB -> ./db/import/*.dump
 │  └─ restore.sh                  # Restauration depuis ./db/import
-├─ templates/
-│  ├─ interface.html              # Page principale — uploads HS pour l’instant
+├─ templates/                     # Pages HTML (Jinja2)
+│  ├─ interface.html              # Page principale (import + analyses)
 │  ├─ resilience.html             # Page Résilience (Leaflet)
-│  └─ ...                         # Login / reset mdp / pages résultats
+│  └─ ...                         # Pages résultats / login / reset mdp
 ├─ static/
 │  ├─ js/                         # script.js, resilience.js, etc.
 │  ├─ css/
-│  ├─ exports/                    # Rapports téléchargeables
-│  └─ results/                    # Résultats HTML/CSV générés
-├─ uploads/                       # Fichiers importés (HS pour l’instant)
-└─ temp_shapefiles/               # Temporaires SIG
-
+│  ├─ exports/                    # fichiers d’export/rapports à télécharger
+│  └─ results/                    # résultats HTML/CSV générés
+├─ uploads/                       # fichiers importés par l’utilisateur
+└─ temp_shapefiles/               # fichiers temporaires (SIG)
+```
 ## 🔐 Authentification
 
 - L’UI est protégée. Crée au moins **un user** :  
