@@ -7,19 +7,15 @@ Cette application Flask permet d'analyser des exports de données de réseaux t�
 
 ---
 
-# 🧱 Stack & services
+## 🧱 Stack & Services
 
-Backend : Flask (Python 3.11), SQLAlchemy, GeoAlchemy2
+- **Backend** : Python 3.11 · Flask · SQLAlchemy · GeoAlchemy2  
+- **Base de données** : PostgreSQL **+ PostGIS**  
+- **Conteneurs** : Docker & Docker Compose  
+- **Schémas DB** : `gracethd`, `resilience`, `public` (dans le `search_path`)  
+- **Ports** : `8000` (web) · `5432` (db) 
 
-DB : PostgreSQL + PostGIS
-
-Conteneurs : Docker & Docker Compose
-
-Schemas DB : gracethd, resilience, public (search_path par défaut)
-
-Ports : 8000 (web) · 5432 (db)
-
-Les scripts d’init auto-créent PostGIS et les schémas gracethd & resilience au premier démarrage de la base.
+> ⚙️ Au **premier démarrage**, les scripts d’init créent l’extension **PostGIS** et les schémas `gracethd` & `resilience`.
 
 # 🔧 Prérequis
 
