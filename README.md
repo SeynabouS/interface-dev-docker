@@ -1,52 +1,47 @@
-Interface d’Analyse Réseau (Flask + PostGIS + Docker)
 
-Salut Romain 👋
-Voici tout ce qu’il te faut pour cloner, lancer et tester l’appli localement.
+# Le Moot — Interface d’Analyse Réseau (Flask + PostGIS + Docker)
 
-⚠️ État actuel
+Salut Romain 👋  
+Voici tout ce qu’il te faut pour **cloner, lancer et tester** l’appli localement.  
+L’objectif : importer un export (lot de fichiers), le stocker en base **PostgreSQL/PostGIS**, lancer des **analyses qualité/cohérence** et afficher des résultats (HTML/CSV). Une page dédiée **“Résilience Réseau”** permet aussi d’importer des couches SIG et de les afficher sur une carte (Leaflet).
 
-Sur la page Interface, l’upload est temporairement HS depuis la dockerisation (problème de conversion/encodage).
-👉 Pour tester, restaure le backup placé dans db/import/ après avoir démarré l’appli.
-Une fois restauré, tous les boutons d’analyses fonctionnent sur les exports existants.
+---
 
-Sur la page Résilience Réseau, tout fonctionne (import, carte, gestion des couches).
+## 🧱 Stack & services
 
-🧱 Stack & services
+- **Backend** : Flask (Python 3.11), SQLAlchemy, GeoAlchemy2
+- **DB** : PostgreSQL + **PostGIS**
+- **Conteneurs** : Docker & Docker Compose
+- **Schemas DB** : `gracethd`, `resilience`, `public` (search_path par défaut)
+- **Ports** : `8000` (web) · `5432` (db)
 
-Backend : Flask (Python 3.11), SQLAlchemy, GeoAlchemy2
+> Les scripts d’init auto‑créent PostGIS et les schémas `gracethd` & `resilience` au **premier démarrage** de la base.
 
-DB : PostgreSQL + PostGIS
+---
 
-Conteneurs : Docker & Docker Compose
+## 🔧 Prérequis
 
-Schémas DB : gracethd, resilience, public (dans le search_path)
+- Docker Desktop (ou Docker Engine) + Docker Compose
+- Ports libres : **8000** (appli) et **5432** (PostgreSQL)
 
-Ports : 8000 (web) · 5432 (db)
+---
 
-Les scripts d’init activent PostGIS et créent gracethd & resilience au premier démarrage.
+## ⚙️ Configuration
 
-🔧 Prérequis
+1) **Cloner le dépôt**  
+```bash
+git clone <URL_DU_REPO> le-moot
+cd le-moot/interface-local
+```
 
-Docker Desktop (ou Docker Engine) + Docker Compose v2
-
-Ports libres : 8000 (appli) et 5432 (PostgreSQL)
-
-⚙️ Configuration
-
-Cloner le dépôt
-
-git clone https://github.com/SeynabouS/interface-dev-docker.git
-cd interface-dev-docker
-
-
-Variables d’environnement
-Copier l’exemple et adapter si besoin :
-
+2) **Variables d’environnement**  
+Copie le fichier d’exemple et adapte si besoin :
+```bash
 cp .env.docker.example .env
+```
 
-
-Valeurs par défaut (OK en local) :
-
+Valeurs par défaut (tu peux les garder en local) :  
+```env
 DB_USERNAME=app
 DB_PASSWORD=app
 DB_NAME=telecom_db
@@ -56,52 +51,103 @@ SECRET_KEY=change-me-please
 PGADMIN_DEFAULT_EMAIL=admin@example.com
 PGADMIN_DEFAULT_PASSWORD=admin
 
-# Dev : afficher le lien de reset de mot de passe dans l’UI
+# Option dev : affiche le lien de réinit de mot de passe dans l’UI
 RESET_LINK_VIA_UI=1
 
 
-DB_HOST/DB_PORT sont gérés par Docker (db:5432).
+DB_HOST et DB_PORT sont déjà gérés par Docker (db:5432).
 
 ▶️ Démarrage rapide (TL;DR)
 
-À la racine du projet :
+Dans le dossier interface-dev-docker/ :
 
 # 1) Construire et démarrer
 docker compose up -d --build
 
 # 2) Vérifier la santé
-curl http://localhost:8000/healthz   # attendu: {"status":"ok","db":true}
+curl http://localhost:8000/healthz   # doit renvoyer {"status":"ok","db":true}
 
-# 3) Créer un utilisateur pour l’UI
+# 3) Créer un utilisateur pour se connecter à l’UI
 docker compose exec web python create_user.py admin admin123
 
-🔁 Restaurer le backup (OBLIGATOIRE pour tester actuellement)
+🔁 Restaurer le backup (OBLIGATOIRE actuellement)
 
-L’upload est HS sur Interface, il faut restaurer un dump que je te fournis depuis db/import/.
-
-Pour importer dans la DB :
+L’upload sur Interface est HS. Restaure le dump fourni (présent dans db/import/).
 
 docker compose exec db bash -lc "pg_restore --clean --if-exists --no-owner --no-acl -f - /import/gracethd.backup | psql -U app -v ON_ERROR_STOP=1 -d telecom_db"
 
 
-Le dossier hôte ./db/import/ est monté dans le conteneur DB sous /import (voir docker-compose.yml).
-
 Ensuite, ouvre l’UI : http://localhost:8000
 
-Identifiants de test : admin / admin123
+Identifiants : admin / admin123
 
-💡 Repartir d’une base vierge :
+Repartir d’une base vierge :
 docker compose down -v && docker compose up -d --build
 
-🗺️ Pages & fonctionnalités
-Page Interface
+🗂️ Structure utile du projet
+interface-dev-docker/
+├─ app.py                         # App Flask (routes, analyses, import, auth)
+├─ Dockerfile                     # Image du service web
+├─ docker-compose.yml             # Services : db (PostGIS) + web (Flask)
+├─ requirements.txt               # Dépendances Python
+├─ .env.docker.example            # Exemple d’env
+├─ db/
+│  ├─ init/00_init_postgis.sql    # Création PostGIS + schémas gracethd/resilience
+│  └─ import/                     # ⬅️ backup .backup (monté en /import dans le conteneur)
+├─ scripts/
+│  ├─ dump.sh                     # Sauvegarde DB -> ./db/import/*.dump
+│  └─ restore.sh                  # Restauration depuis ./db/import
+├─ templates/
+│  ├─ interface.html              # Page principale — uploads HS pour l’instant
+│  ├─ resilience.html             # Page Résilience (Leaflet)
+│  └─ ...                         # Login / reset mdp / pages résultats
+├─ static/
+│  ├─ js/                         # script.js, resilience.js, etc.
+│  ├─ css/
+│  ├─ exports/                    # Rapports téléchargeables
+│  └─ results/                    # Résultats HTML/CSV générés
+├─ uploads/                       # Fichiers importés (HS pour l’instant)
+└─ temp_shapefiles/               # Temporaires SIG
 
-Upload (temporairement HS) — à la remise en service :
-sélection d’un dossier (CSV/DBF/SHP/XLSX/JSON), saisie de date d’export, chargement en base (gracethd).
+🔐 Authentification
 
-Analyses (OK avec backup restauré) :
+Créer un utilisateur :
 
-Analyser Tout (export unique)
+docker compose exec web python create_user.py <login> <motdepasse>
+
+
+Réinitialiser : menu “Mot de passe oublié” (/forgot)
+
+En dev, si RESET_LINK_VIA_UI=1, le lien de reset apparaît dans l’UI et dans les logs.
+
+Sinon, récupérer le lien :
+
+docker compose logs -f web | grep RESET
+
+📥 Importer un export (jeu de fichiers)
+
+Se connecter à l’UI → “Analyse d’un Export à une Date Donnée”
+
+Sélectionner un dossier (le bouton accepte un dossier complet)
+
+Formats supportés : .csv, .dbf, .shp, .xlsx, .json (auto-détection encodage & séparateur)
+
+Renseigner la date d’export (ex. 2025-09-15)
+
+Cliquer “Importer dans la Base”
+
+Les tables sont créées dans gracethd avec le nom : YYYY-MM-DD_nomFichier.ext
+(ex. 2025-09-15_t_cable.csv)
+
+Actuellement l’upload est HS. Utiliser la restauration du backup (section ci-dessus) pour tester les analyses.
+
+🔎 Lancer des analyses
+
+Toujours sur la page principale :
+
+Analyser Tout (export unique) : exécute l’ensemble des contrôles
+
+Analyses ciblées :
 
 Présence des champs (presence_champ_csv)
 
@@ -112,98 +158,40 @@ Câbles (analyze_cable)
 Chambres (analyze_chambre)
 
 Fourreaux (analyze_fourreaux)
-Résultats générés en HTML/CSV dans static/results/ (liens dans l’UI).
 
-Analyses logiques — Référence des points du réseau (OK avec backup restauré) :
+Chaque analyse génère des HTML/CSV dans static/results/ (liens dans l’UI).
 
-Analyser t_baie ℹ️
+Analyses logiques — Référence des points du réseau
 
-Analyser t_cab_cond ℹ️
+t_baie, t_cab_cond, t_cassette, t_cheminement, t_cond_chem, cohérence câble,
+t_conduite → t_organisme, t_ebp, t_fibre → t_cable, position, t_ltech,
+p_ptech, t_ropt, t_sitetech, t_suf, t_tiroir, t_cableline, t_noeud
 
-Analyser t_cassette ℹ️
+Comparer deux exports
 
-Analyser t_cheminement ℹ️
+Importer la 2ᵉ version via le formulaire “Comparaison” (/upload_different_version)
 
-Analyser t_cond_chem ℹ️
+Lancer : Comparer BPE (compare_ebp) · Comparer Câbles (compare_cable) ·
+Comparer Points Techniques (compare_PointTechnique) · Comparer Cheminement (compare_cheminement)
 
-Analyser cohérence câble ℹ️
+🗺️ Page “Résilience Réseau” (SIG)
 
-Analyser t_conduite → t_organisme ℹ️
+Accès : bouton “Résilience Réseau” depuis la page principale
 
-Analyser t_ebp ℹ️
+Objectif : importer des couches (CSV/DBF/SHP…) dans resilience, puis afficher sur carte (Leaflet)
 
-Analyser t_fibre → t_cable ℹ️
+Fonctions : affichage/masquage par couche, suppression, couleurs, etc.
 
-Analyser position ℹ️
+Temporaires : temp_shapefiles/
 
-Analyser t_ltech ℹ️
+🧰 Scripts utiles
+# Sauvegarder la base (-> ./db/import/backup.dump)
+scripts/dump.sh [nom.dump]
 
-Analyser p_ptech ℹ️
+# Restaurer un dump placé dans ./db/import/
+scripts/restore.sh <nom.dump|nom.sql>
 
-Analyser t_ropt ℹ️
-
-Analyser t_sitetech ℹ️
-
-Analyser t_suf ℹ️
-
-Analyser t_tiroir ℹ️
-
-Analyser t_cableline ℹ️
-
-Analyser t_noeud ℹ️
-
-Comparaison de deux exports (quand 2 versions sont en base) :
-compare_ebp · compare_cable · compare_PointTechnique · compare_cheminement.
-
-Page Résilience Réseau ✅
-
-Import de couches SIG (CSV/DBF/SHP…) → schéma resilience
-
-Carte Leaflet, affichage/masquage par couche, suppression, couleurs, etc.
-
-Temporaires dans temp_shapefiles/.
-
-🔐 Authentification
-
-Créer un utilisateur :
-
-docker compose exec web python create_user.py <login> <motdepasse>
-
-
-Réinitialisation via “Mot de passe oublié” (/forgot) :
-
-si RESET_LINK_VIA_UI=1 → lien dans l’UI et dans les logs,
-
-sinon, récupérer le lien :
-
-docker compose logs -f web | grep RESET
-
-🗂️ Structure utile du projet
-interface-dev-docker/
-├─ app.py
-├─ Dockerfile
-├─ docker-compose.yml
-├─ requirements.txt
-├─ .env.docker.example
-├─ db/
-│  ├─ init/00_init_postgis.sql
-│  └─ import/                # ⬅️ place/vois ici le backup à restaurer
-├─ scripts/
-│  ├─ dump.sh                # sauvegarde -> ./db/import/*.dump
-│  └─ restore.sh             # restauration depuis ./db/import
-├─ templates/
-│  ├─ interface.html         # (uploads HS)
-│  ├─ resilience.html        # (OK)
-│  └─ ...                    # login / reset mdp / résultats
-├─ static/
-│  ├─ js/                    # script.js, resilience.js, …
-│  ├─ css/
-│  ├─ exports/               # rapports
-│  └─ results/               # HTML/CSV générés
-├─ uploads/                  # (HS pour l’instant)
-└─ temp_shapefiles/          # temporaires SIG
-
-🧪 Endpoints utiles
+🧪 Endpoints utiles (débogage)
 
 Healthcheck : GET http://localhost:8000/healthz → {"status":"ok","db":true}
 
@@ -211,14 +199,13 @@ Résultats : servis depuis static/results/
 
 🐛 Dépannage
 
-Uploads (Interface) → 500 + “Unexpected token '<' … not valid JSON”
-Problème connu (page HTML renvoyée au lieu du JSON).
+Uploads (Interface) → 500 + “Unexpected token '<' … not valid JSON” (page HTML renvoyée au lieu du JSON)
 
-Utiliser le backup (voir Démarrage rapide).
+Utiliser le backup (voir Démarrage rapide)
 
-Vérifier la session (être connecté).
+Vérifier la session (être connecté)
 
-Vérifier la DB : curl http://localhost:8000/healthz (doit afficher db:true).
+Vérifier la DB : curl http://localhost:8000/healthz (doit afficher db:true)
 
 Logs :
 
@@ -230,11 +217,26 @@ Repartir propre :
 docker compose down -v && docker compose up -d --build
 
 
-Port occupé : modifier ports: dans docker-compose.yml (ex. 8080:8000).
+Port occupé : modifier ports: dans docker-compose.yml (ex. 8080:8000)
 
-pgAdmin (si activé) : hôte db, port 5432, login DB_USERNAME / DB_PASSWORD.
+pgAdmin (si activé) : hôte db, port 5432, login DB_USERNAME / DB_PASSWORD
 
-✉️ Contact
+🧯 Arrêt & nettoyage
+# Arrêter les conteneurs
+docker compose down
 
-Si un point bloque, ping moi.
+# Tout supprimer (y compris les volumes -> DB réinitialisée)
+docker compose down -v
+
+🔒 Notes sécurité (local)
+
+Le SECRET_KEY et les mots de passe de démo ne sont pas faits pour la prod
+
+En environnement partagé, change-les
+
+🙋‍♀️ Besoin d’aide ?
+
+Tu peux me ping si quelque chose ne tourne pas rond.
 Bon test ! 🚀
+
+ChatGPT peut commettre des erreurs. Il est
