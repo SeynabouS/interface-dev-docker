@@ -139,7 +139,7 @@ interface-local/
 3. Renseigne **la date d’export** (ex. `2025-09-15`).  
 4. Clique **“Importer dans la Base”**.  
 5. Les tables sont créées dans le schéma **`gracethd`** avec le nom :  
-   `YYYY-MM-DD_nomFichier.ext` (ex. `2025-09-15_t_cable.csv`).
+   `YYYY-MM_nomFichier.ext` (ex. `2025-09_t_cable.csv`).
 
 > L’app utilise le `search_path = gracethd,resilience,public`. Pas besoin de préfixer les schémas dans les requêtes.
 
