@@ -136,7 +136,7 @@ interface-local/
 1. Connecte-toi à l’UI → **“Analyse d’un Export à une Date Donnée”**.  
 2. **Sélectionne le dossier** de l’export (le bouton accepte un **dossier** complet).  
    - Fichiers supportés : **.csv**, **.dbf**, **.shp**, **.xlsx**, **.json** (auto-détection d’encodage & séparateur).  
-3. Renseigne **la date d’export** (ex. `2025-09-15`).  
+3. Renseigne **la date d’export** (ex. `2025-09`).  
 4. Clique **“Importer dans la Base”**.  
 5. Les tables sont créées dans le schéma **`gracethd`** avec le nom :  
    `YYYY-MM_nomFichier.ext` (ex. `2025-09_t_cable.csv`).
