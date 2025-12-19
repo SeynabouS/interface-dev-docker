@@ -1,212 +1,209 @@
-Interface d’Analyse Réseau (Flask + PostGIS + Docker)
+# Interface d’Analyse Réseau (Flask + PostGIS + Docker)
 
-Salut Romain 👋
-Voici un guide clair et rapide pour cloner, lancer et tester l’application en local.
+![Flask](https://img.shields.io/badge/Flask-2.3.x-blue)
+![PostGIS](https://img.shields.io/badge/PostGIS-3.4-green)
+![Docker](https://img.shields.io/badge/Docker-Compose-orange)
+![Python](https://img.shields.io/badge/Python-3.11-yellow)
 
-Cette application Flask permet :
+Application Flask permettant d'importer et analyser des exports télécoms avec PostgreSQL/PostGIS, incluant une interface cartographique pour la résilience réseau.
 
-d’importer et stocker des exports télécoms dans PostgreSQL/PostGIS,
+## ✨ Fonctionnalités
 
-d’exécuter des analyses de cohérence (HTML/CSV),
+- **Import et stockage** d'exports télécoms dans PostgreSQL/PostGIS
+- **Analyses de cohérence** avec export HTML/CSV
+- **Page Résilience Réseau** pour charger et visualiser des couches SIG
+- **Interface cartographique** interactive (Leaflet)
+- **Gestion d'utilisateurs** avec authentification
 
-d’utiliser une page dédiée Résilience Réseau pour charger des couches SIG et les exploiter sur une carte.
+## 🏗️ Architecture
 
-🧱 Stack & Services
-
+```
 Backend : Python 3.11 · Flask · SQLAlchemy · GeoAlchemy2
-
-DB : PostgreSQL + PostGIS
-
-Conteneurs : Docker & Docker Compose
-
+Base de données : PostgreSQL + PostGIS
+Conteneurisation : Docker & Docker Compose
 Schémas DB : gracethd, resilience, public (via search_path)
-
 Ports : 8000 (web) · 5432 (db)
+```
 
-✅ Image DB PostGIS utilisée : postgis/postgis:16-3.4 (plus stable sur Mac/Windows)
+## 📋 Prérequis
 
-⚙️ Au premier démarrage, les scripts d’init créent l’extension PostGIS et les schémas gracethd et resilience.
+- **Docker Desktop** (ou Docker Engine + Docker Compose)
+- **Ports disponibles** : 8000 et 5432
+- **Git** pour cloner le dépôt
 
-🔧 Prérequis
+## 🚀 Installation Rapide
 
-Docker Desktop (ou Docker Engine) + Docker Compose
-
-Ports libres : 8000 (appli) et 5432 (PostgreSQL)
-
-⚙️ Installation & Configuration
-1) Cloner le dépôt
+### 1. Cloner le dépôt
+```bash
 git clone https://github.com/SeynabouS/interface-dev-docker.git
 cd interface-dev-docker
+```
 
-2) Créer le fichier .env
+### 2. Configuration de l'environnement
+```bash
 cp .env.docker.example .env
+```
 
-
-Valeurs par défaut (OK en local) :
-
+Les valeurs par défaut (.env) :
+```env
 DB_USERNAME=app
 DB_PASSWORD=app
 DB_NAME=telecom_db
 SECRET_KEY=change-me-please
-
-# pgAdmin activé via docker-compose (si présent)
 PGADMIN_DEFAULT_EMAIL=admin@example.com
 PGADMIN_DEFAULT_PASSWORD=admin
-
-# Dev : affiche le lien de réinit mdp dans l’UI
 RESET_LINK_VIA_UI=1
+```
 
-
-DB_HOST/DB_PORT sont gérés par Docker (connexion interne db:5432).
-
-▶️ Démarrage rapide (guide “prêt à tester”)
-
-Dans le dossier du projet :
-
-Étape 1 — Build + démarrage des conteneurs
+### 3. Démarrage des conteneurs
+```bash
 docker compose up -d --build
+```
 
-Étape 2 — Initialiser la base (OBLIGATOIRE)
+### 4. Initialisation de la base de données
+```bash
 docker compose exec web flask --app app init-db
+```
 
-Étape 3 — Créer un utilisateur pour se connecter à l’UI
+### 5. Création d'un utilisateur
+```bash
 docker compose exec web python create_user.py admin admin123
+```
 
-Étape 4 — Restaurer le backup (OBLIGATOIRE actuellement)
+### 6. Restauration du backup (nécessaire actuellement)
 
-📌 L’upload via l’interface est HS pour le moment → on restaure le dump fourni :
-Le fichier attendu est dans db/import/ : gracethd.backup
+**Windows (PowerShell) :**
+```powershell
+docker run --rm --network interface-local_default -v "${PWD}/db/import:/import" -e PGPASSWORD=app postgres:17 pg_restore --clean --if-exists --no-owner --role=app -h db -p 5432 -U app -d telecom_db /import/gracethd.backup
+```
 
-✅ Commande PowerShell (Windows)
-docker run --rm --network interface-local_default `
-  -v "${PWD}/db/import:/import" `
-  -e PGPASSWORD=app `
-  postgres:17 `
-  pg_restore --clean --if-exists --no-owner --role=app -h db -p 5432 -U app -d telecom_db /import/gracethd.backup
-
-✅ Commande Bash (Linux/macOS)
+**Linux/macOS (Bash) :**
+```bash
 docker run --rm --network interface-local_default \
   -v "${PWD}/db/import:/import" \
   -e PGPASSWORD=app \
   postgres:17 \
   pg_restore --clean --if-exists --no-owner --role=app -h db -p 5432 -U app -d telecom_db /import/gracethd.backup
+```
 
+> **Note :** Si le réseau Docker a un nom différent, vérifiez avec `docker network ls` et adaptez la commande.
 
-ℹ️ Si ton réseau Docker ne s’appelle pas interface-local_default, liste-le avec :
-
-docker network ls
-
-
-et remplace interface-local_default par le bon nom.
-
-Étape 5 — Vérifier que tout est OK
+### 7. Vérification
+```bash
 curl http://localhost:8000/healthz
+```
+Réponse attendue : `{"status":"ok","db":true}`
 
+### 8. Accéder à l'application
+- **URL :** http://localhost:8000
+- **Identifiants :** admin / admin123
 
-Attendu :
+## 📁 Structure du projet
 
-{"status":"ok","db":true}
-
-Étape 6 — Ouvrir l’application
-
-URL : http://localhost:8000
-
-Login : admin
-
-Password : admin123
-
-🗂️ Structure utile du projet
+```
 interface-dev-docker/
-├─ app.py                         # App Flask (routes, analyses, import, auth)
-├─ Dockerfile                     # Image du service web
-├─ docker-compose.yml             # Services : db (PostGIS) + web (Flask)
-├─ requirements.txt               # Dépendances Python
-├─ .env.docker.example            # Exemple d’env
-├─ db/
-│  ├─ init/00_init_postgis.sql    # Création PostGIS + schémas gracethd/resilience
-│  └─ import/                     # dumps à restaurer (gracethd.backup)
-├─ scripts/
-│  ├─ dump.sh                     # Sauvegarde DB
-│  └─ restore.sh                  # Restauration DB
-├─ templates/
-│  ├─ interface.html              # Page principale (import + analyses)
-│  ├─ resilience.html             # Page Résilience (Leaflet)
-│  └─ ...                         # login / reset mdp / pages résultats
-├─ static/
-│  ├─ js/                         # script.js, resilience.js, etc.
-│  ├─ css/
-│  ├─ exports/                    # exports téléchargeables
-│  └─ results/                    # résultats HTML/CSV générés
-├─ uploads/                       # fichiers importés via l’UI
-└─ temp_shapefiles/               # temporaires SIG
+├── app.py                      # Application Flask principale
+├── Dockerfile                  # Image du service web
+├── docker-compose.yml          # Services Docker
+├── requirements.txt            # Dépendances Python
+├── .env.docker.example         # Exemple de fichier d'environnement
+├── db/
+│   ├── init/                   # Scripts d'initialisation DB
+│   │   └── 00_init_postgis.sql
+│   └── import/                 # Backups à restaurer
+├── scripts/
+│   ├── dump.sh                 # Sauvegarde de la base
+│   └── restore.sh              # Restauration de la base
+├── templates/                  # Templates HTML
+│   ├── interface.html          # Page principale
+│   ├── resilience.html         # Page Résilience Réseau
+│   └── ...                     # Pages d'authentification
+├── static/                     # Fichiers statiques
+│   ├── js/                     # JavaScript
+│   ├── css/                    # Feuilles de style
+│   ├── exports/                # Exports téléchargeables
+│   └── results/                # Résultats d'analyse
+├── uploads/                    # Fichiers importés
+└── temp_shapefiles/            # Fichiers SIG temporaires
+```
 
-🔐 Authentification
+## 🔐 Authentification
 
-Créer un user :
+### Créer un utilisateur
+```bash
+docker compose exec web python create_user.py <username> <password>
+```
 
-docker compose exec web python create_user.py <login> <motdepasse>
+### Réinitialisation de mot de passe
+- Accédez à `/forgot` depuis l'interface
+- Si `RESET_LINK_VIA_UI=1`, le lien s'affiche dans l'UI
+- Sinon, consultez les logs : `docker compose logs -f web | grep RESET`
 
+## 🗺️ Page "Résilience Réseau"
 
-Réinitialisation mdp : /forgot
+Accessible via le bouton "Résilience Réseau" sur la page principale.
 
-Si RESET_LINK_VIA_UI=1, le lien s’affiche dans l’UI + dans les logs.
+**Fonctionnalités :**
+- Import de couches géospatiales (SHP, GeoJSON, etc.) dans le schéma `resilience`
+- Visualisation interactive sur carte Leaflet
+- Gestion des couches (affichage/masquage, suppression, coloration)
+- Analyse des objets avec couches support "aléas"
 
-Sinon, logs :
+## 🔧 Endpoints utiles
 
-docker compose logs -f web | grep RESET
+- **Healthcheck :** `GET http://localhost:8000/healthz`
+- **Résultats d'analyse :** servis depuis `static/results/`
 
-🗺️ Page “Résilience Réseau”
+## 🐛 Dépannage
 
-Accès : bouton “Résilience Réseau” depuis la page principale.
-
-Objectif :
-
-Importer des couches géospatiales (shp, geojson, etc.) dans le schéma resilience
-
-Afficher les couches sur une carte (Leaflet)
-
-Exploiter les couches support “aléas” pour enrichir / analyser les objets
-
-Fonctions côté UI :
-
-affichage/masquage par couche
-
-suppression (avec dépendances)
-
-coloration
-
-🧪 Endpoints utiles
-
-Healthcheck : GET http://localhost:8000/healthz
-
-Résultats d’analyses : servis depuis static/results/
-
-🐛 Dépannage rapide
-
-Repartir de zéro (DB incluse) :
-
+### Redémarrer complètement (supprime la base)
+```bash
 docker compose down -v && docker compose up -d --build
+```
 
-
-Logs web :
-
+### Consulter les logs
+```bash
 docker compose logs -f web
+```
 
+### Port déjà utilisé
+Modifiez le mapping dans `docker-compose.yml` :
+```yaml
+ports:
+  - "8080:8000"  # Au lieu de "8000:8000"
+```
 
-Port occupé : modifier le mapping dans docker-compose.yml (ex: 8080:8000)
+### Accéder à pgAdmin (si activé)
+- **URL :** http://localhost:5050
+- **Connexion DB :**
+  - Host: `db`
+  - Port: `5432`
+  - Database: `telecom_db`
+  - Username: `app`
+  - Password: `app`
 
-pgAdmin : connexion PostgreSQL via :
+## 🧯 Arrêt et nettoyage
 
-Host : db
-
-Port : 5432
-
-DB : telecom_db
-
-User : app
-
-Password : app
-
-🧯 Arrêt & nettoyage
+### Arrêt simple (conserve les données)
+```bash
 docker compose down
-docker compose down -v   # supprime aussi les volumes (DB reset)
+```
+
+### Arrêt complet (supprime volumes et données)
+```bash
+docker compose down -v
+```
+
+## 📝 Notes
+
+- L'upload via interface est temporairement désactivé - utilisez la restauration de backup
+- L'image PostGIS utilisée est `postgis/postgis:16-3.4` pour une meilleure stabilité
+- Les scripts d'initialisation créent automatiquement les extensions et schémas nécessaires
+
+## 🤝 Contribution
+
+Les issues et pull requests sont les bienvenues pour améliorer l'application.
+
+## 📄 Licence
+
+[À compléter selon la licence du projet]
