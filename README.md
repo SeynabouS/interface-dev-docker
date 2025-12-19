@@ -200,10 +200,3 @@ docker compose down -v
 - L'image PostGIS utilisée est `postgis/postgis:16-3.4` pour une meilleure stabilité
 - Les scripts d'initialisation créent automatiquement les extensions et schémas nécessaires
 
-## 🤝 Contribution
-
-Les issues et pull requests sont les bienvenues pour améliorer l'application.
-
-## 📄 Licence
-
-[À compléter selon la licence du projet]
