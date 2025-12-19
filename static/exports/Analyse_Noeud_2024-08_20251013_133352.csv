@@ -1,0 +1,13 @@
+Analyse t_noeud;2024-08
+
+Total de lignes;7799
+
+Test;Manquants/Total;%
+nd_codeext;7799/7799;100.0%
+
+Détail (max 10)
+nd_codeext;"""3461273"", ""3461275"", ""3461279"", ""3461284"", ""3461299"", ""3461304"", ""3461306"", ""3461311"", ""3461314"", ""3461322"""
+
+Unicité de nd_code;7798;99.99%
+Doublons;1;0.01%
+Doublons;1;0.01%

@@ -30,11 +30,14 @@ from flask import jsonify, request
 import re
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from dotenv import load_dotenv
+from sqlalchemy.sql.elements import quoted_name as sa_quoted_name
 load_dotenv() 
 
 from sqlalchemy import create_engine, text
 
 app = Flask(__name__)
+
+SIDE_CAR_EXTS = {'.dbf', '.shx', '.prj', '.cpg', '.sbn', '.sbx'}
 
 # --- Options app ---
 app.config['RESET_LINK_VIA_UI'] = os.getenv('RESET_LINK_VIA_UI', '0') == '1'
@@ -245,7 +248,7 @@ class Export(db.Model):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT','5000')), debug=os.getenv('FLASK_DEBUG','0')=='1')
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT','8000')), debug=os.getenv('FLASK_DEBUG','0')=='1')
 
 
 
@@ -374,6 +377,91 @@ def load_table_any(export_date: str, base_name: str, prefer: str = '.csv') -> pd
 def serve_image(filename):
     return send_from_directory('image', filename)
 
+DEFAULT_SRID = 2154  # Lambert-93
+SIDE_CAR_EXTS = {'.dbf', '.shx', '.prj', '.cpg', '.sbn', '.sbx'}
+
+def prepare_gdf_for_postgis(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    - Reprojette en L93 (2154)
+    - Réutilise la géométrie existante
+    - Renomme tout attribut parasite nommé 'geometry' / 'geom'
+    - Normalise le nom de la géo en 'geom'
+    - Déduplique tous les noms de colonnes
+    """
+    # 0) CRS -> L93
+    if gdf.crs is None:
+        gdf = gdf.set_crs(epsg=4326)
+    gdf = gdf.to_crs(epsg=DEFAULT_SRID)
+
+    # 1) Nom de la colonne géométrique ACTUELLE
+    current_geom = gdf.geometry.name  # souvent 'geometry'
+
+    # 2) Si un attribut porte le même nom (ex. 'geometry' dans le DBF), on le renomme
+    rename_map = {}
+    for c in gdf.columns:
+        if c == current_geom:
+            continue  # c'est la vraie géo
+        if c.lower() in ("geometry", "geom"):
+            # évite toutes collisions avec le futur nom 'geom'
+            newc = f"{c}_attr"
+            i = 1
+            while newc in gdf.columns:
+                newc = f"{c}_attr{i}"
+                i += 1
+            rename_map[c] = newc
+    if rename_map:
+        gdf = gdf.rename(columns=rename_map)
+
+    # 3) Renommer la géométrie en 'geom' (standard PostGIS)
+    if current_geom != 'geom':
+        gdf = gdf.rename_geometry('geom')
+        current_geom = 'geom'
+
+    # 4) Dédupliquer proprement tous les noms (sécurité)
+    new_cols, seen = [], set()
+    for c in gdf.columns:
+        name = str(c).strip()
+        base = name
+        k = 1
+        # réserve 'geom' pour la géométrie
+        if name == 'geom' and c != 'geom':
+            name = f"{base}_{k}"; k += 1
+        while name in seen:
+            name = f"{base}_{k}"
+            k += 1
+        new_cols.append(name)
+        seen.add(name)
+    gdf.columns = new_cols
+    gdf = gdf.set_geometry('geom')
+
+    return gdf
+
+
+def import_shapefile_to_postgis(shp_path: str, table_name: str, schema: str = "gracethd"):
+    """
+    Lit un SHP, normalise, et pousse en PostGIS dans gracethd.
+    - Réutilise la géométrie existante (renommée en 'geom')
+    - dtype explicite pour 'geom' (SRID 2154)
+    - Quote le nom de table (contient un point)
+    """
+    gdf = gpd.read_file(shp_path)
+    gdf = prepare_gdf_for_postgis(gdf)
+
+    qname = sa_quoted_name(table_name, True)  # ex: "2025-10_t_noeud.shp"
+
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL search_path TO gracethd, public"))
+        # if_exists='replace' suffit, mais on ajoute un DROP défensif pour les reliquats
+        conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table_name}" CASCADE'))
+
+        gdf.to_postgis(
+            name=qname,
+            con=conn,
+            schema=schema,
+            if_exists="fail",        # après le DROP, la création doit passer
+            index=False,
+            dtype={"geom": Geometry("GEOMETRY", srid=DEFAULT_SRID)}
+        )
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
@@ -381,63 +469,59 @@ def upload_files():
         export_date = request.form.get('export_date')
         files = request.files.getlist('file')
 
-        logging.debug(f"Nombre de fichiers reçus: {len(files)}")
-        for file in files:
-            logging.debug(f"Fichier reçu: {file.filename}")
-
-        # Créer le répertoire uploads s'il n'existe pas, avec tous les sous-dossiers nécessaires
         upload_dir = os.path.join(os.getcwd(), 'uploads', export_date)
         os.makedirs(upload_dir, exist_ok=True)
-        logging.debug(f"Répertoire de destination: {upload_dir}")
 
-        # Étape : Importer chaque fichier dans PostgreSQL
-        for file in files:
-            # Extraire uniquement le nom de fichier sans le chemin du dossier
-            file_name = os.path.basename(file.filename)
-            file_path = os.path.normpath(os.path.join(upload_dir, file_name))
-            try:
-                # Sauvegarder le fichier dans le répertoire de destination
-                logging.debug(f"Tentative de sauvegarde du fichier: {file_name} dans {file_path}")
-                file.save(file_path)
-                if not os.path.exists(file_path):
-                    raise FileNotFoundError(f"Le fichier {file_name} n'a pas été correctement sauvegardé dans {file_path}")
+        saved_files = []
+        for f in files:
+            fname = os.path.basename(f.filename)
+            fpath = os.path.normpath(os.path.join(upload_dir, fname))
+            os.makedirs(os.path.dirname(fpath), exist_ok=True)
+            f.save(fpath)
+            saved_files.append(fpath)
 
-                # Importer chaque fichier directement en tant que table
-                table_name = f'{export_date}_{file_name}'  # Conserver l'extension du fichier
+        # Regroupe par stem
+        stems = {}
+        for p in saved_files:
+            stem, ext = os.path.splitext(os.path.basename(p))
+            stems.setdefault(stem, set()).add(ext.lower())
+        shapefile_stems = {s for s, exts in stems.items() if '.shp' in exts}
 
-                df = read_file_generic(file_path)
-                logging.debug(f"DataFrame pour {file_name}:\n{df.head()}\n")
-                
-                # Modification ici pour traiter les fichiers vides
-                if df.empty:
-                    logging.warning(f"Le DataFrame extrait du fichier {file_name} est vide. Création d'une table avec uniquement les colonnes.")
-                    # Créer une table vide avec seulement les colonnes
-                    df = pd.DataFrame(columns=df.columns)  # Ensure it keeps the correct structure
-                
-                # Importer les données dans PostgreSQL, même si df est vide
-                df.columns = df.columns.astype(str)  # Assurer que tous les noms de colonnes sont des chaînes de caractères
-                df.to_sql(table_name, engine, schema='gracethd', index=False, if_exists='replace')
-                
-                # Enregistrer l'information sur l'export dans la base de données
-                new_export = Export(export_date=export_date, file_name=file_name, table_name=table_name)
-                db.session.add(new_export)
+        # 1) SHP -> PostGIS EPSG:2154, nom "<date>_<file>.shp"
+        for stem in sorted(shapefile_stems):
+            shp_path = os.path.join(upload_dir, f"{stem}.shp")
+            if not os.path.exists(shp_path):
+                continue
+            table_name = f"{export_date}_{stem}.shp"
+            import_shapefile_to_postgis(shp_path, table_name, schema="gracethd")
+            db.session.add(Export(export_date=export_date, file_name=f"{stem}.shp", table_name=table_name))
 
-            except ValueError as e:
-                logging.error(f"Erreur de valeur: {str(e)}")
-                return jsonify({"message": str(e)}), 500
-            except FileNotFoundError as e:
-                logging.error(f"Erreur de fichier introuvable: {str(e)}")
-                return jsonify({"message": str(e)}), 500
-            except Exception as e:
-                logging.error(f"Erreur générale lors de l'importation du fichier {file_name}: {str(e)}")
-                return jsonify({"message": f"Erreur lors de l'importation du fichier {file_name}: {str(e)}"}), 500
+        # 2) Le reste (CSV/XLSX/JSON/DBF...) en tabulaire, en sautant les sidecars des SHP
+        for p in saved_files:
+            fname = os.path.basename(p)
+            stem, ext = os.path.splitext(fname)
+            ext = ext.lower()
+
+            if stem in shapefile_stems and (ext == '.shp' or ext in SIDE_CAR_EXTS):
+                continue  # sidecars ignorés (déjà pris en charge via SHP)
+
+            table_name = f"{export_date}_{fname}"
+            df = read_file_generic(p)  # ta fonction existante
+            if df.empty:
+                df = pd.DataFrame(columns=df.columns)
+            df.columns = df.columns.astype(str)
+
+            qname = sa_quoted_name(table_name, True)
+            df.to_sql(qname, engine, schema='gracethd', index=False, if_exists='replace')
+            db.session.add(Export(export_date=export_date, file_name=fname, table_name=table_name))
 
         db.session.commit()
         return jsonify({"message": "Fichiers importés avec succès"}), 200
 
     except Exception as e:
-        logging.error(f"Erreur serveur: {str(e)}")
-        return jsonify({"message": f"Erreur serveur: {str(e)}"}), 500
+        db.session.rollback()
+        logging.exception("Erreur serveur")
+        return jsonify({"message": f"Erreur serveur: {e}"}), 500
 
 
 if __name__ == '__main__':

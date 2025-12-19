@@ -1,8 +1,6 @@
-version: "3.9"
-
 services:
   db:
-    image: postgis/postgis:17-3.5
+    image: postgis/postgis:16-3.4
     container_name: telecom_db
     environment:
       POSTGRES_USER: ${DB_USERNAME:-app}
@@ -24,7 +22,7 @@ services:
       retries: 10
 
   pgadmin:
-    image: dpage/pgadmin4:8.13
+    image: dpage/pgadmin4:latest
     container_name: telecom_pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}

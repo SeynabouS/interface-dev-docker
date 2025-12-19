@@ -1,0 +1,18 @@
+Analyse t_ptech;2024-08
+
+Total lignes;6076
+
+PT_CODEEXT invalides;3;0.05%
+pt_nd_code invalides;6073;99.95%
+pt_prop invalides;6;0.1%
+pt_gest invalides;6;0.1%
+pt_user invalides;6076;100.0%
+pt_nature vides;12;0.2%
+pt_ad_code invalides;6076;100.0%
+
+Analyse unicité – pt_code
+Total lignes;6076
+Valeurs remplies;6076
+Valeurs uniques;6074
+Doublons (max 10);""""
+

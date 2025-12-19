@@ -13,11 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 2) (Optionnel mais recommandé si tu es derrière un proxy d'entreprise)
-#    Dépose le certificat racine de ton proxy comme 'company-ca.crt' à la racine du projet,
-#    puis dé-commente les 2 lignes ci-dessous :
-# COPY company-ca.crt /usr/local/share/ca-certificates/company-ca.crt
-# RUN update-ca-certificates
+
 
 # 3) Rend pip/requests plus calmes et utilise la trust store système
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -26,7 +22,6 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # 4) Copie le requirements AVANT l'install (assure-toi qu'il existe !)
-#    → Si tu n'en as pas, voir le modèle plus bas.
 COPY requirements.txt ./requirements.txt
 
 # 5) Installe les deps Python.

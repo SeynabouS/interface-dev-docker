@@ -1,0 +1,13 @@
+Analyse t_noeud;2025-07
+
+Total de lignes;12088
+
+Test;Manquants/Total;%
+nd_codeext;0/12088;0.0%
+
+Détail (max 10)
+nd_codeext;Aucun
+
+Unicité de nd_code;12088;100.0%
+Doublons;0;0.0%
+Doublons;0;0.0%

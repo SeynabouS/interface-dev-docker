@@ -1,0 +1,12 @@
+Analyse t_cableline;2025-07
+
+Total de lignes;4646
+
+Test;Manquants/Total;%
+cl_cb_code;0/4646;0.0%
+
+Détail (max 10)
+cl_cb_code;Aucun
+
+Unicité de cl_code;4646;100.0%
+Doublons;0;0.0%
