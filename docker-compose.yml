@@ -58,7 +58,7 @@ services:
       - ./uploads:/app/uploads
       - ./temp_shapefiles:/app/temp_shapefiles
       - ./static:/app/static
-    command: gunicorn -w 3 -b 0.0.0.0:8000 app:app
+    command: gunicorn -w 2 -b 0.0.0.0:8000 --timeout 300 --graceful-timeout 300 app:app
     restart: unless-stopped
 
 volumes:

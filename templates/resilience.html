@@ -34,8 +34,8 @@
             <h2>Importer des Données de Résilience</h2>
             <form id="resilience-form" enctype="multipart/form-data">
                 <div class="file-input-container">
-                    <label for="resilience-files">Fichiers GPKG :</label>
-                    <input type="file" id="resilience-files" name="files" multiple accept=".gpkg">
+                    <label for="resilience-files">Fichiers GPKG ou Shapefile :</label>
+                    <input type="file" id="resilience-files" name="files" multiple accept=".gpkg,.shp,.shx,.dbf,.prj,.cpg,.sbn,.sbx">
                 </div>
 
                 <div id="file-names-container" class="file-list"></div>
@@ -45,8 +45,6 @@
                 </div>
             </form>
         </section>
-
-     
 
         <!-- Section Affichage -->
         <section class="section">
@@ -72,6 +70,21 @@
                 </div>
             </div>
             <div id="resilience-map" style="height: 600px; margin-top: 20px;"></div>
+        </section>
+
+
+
+        <!-- Section Test aléas -->
+        <section class="section">
+            <h2>Visualiser les aléas sur une couche</h2>
+            <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                <label for="alea-main-layer"><strong>Couche principale :</strong></label>
+                <select id="alea-main-layer"></select>
+                <button type="button" id="alea-run-btn" class="btn-import-green">Lancer le test</button>
+                <span id="alea-progress" style="color:#555;"></span>
+                <a id="alea-download-link" href="#" style="display:none; font-weight:bold;">Télécharger le CSV</a>
+            </div>
+            <div id="alea-log" class="file-list" style="margin-top:10px;"></div>
         </section>
 
 

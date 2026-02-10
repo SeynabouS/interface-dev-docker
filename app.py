@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, redirect, send_from_directory, url_for, session, flash,  send_file
+from flask import Flask, request, jsonify, render_template, redirect, send_from_directory, url_for, session, flash, send_file, Response
 from werkzeug.utils import secure_filename
 import geopandas as gpd
 from geoalchemy2 import Geometry
@@ -15,6 +15,13 @@ import base64
 import csv
 from sqlalchemy import inspect
 from io import StringIO  
+from shapely.geometry import shape, Polygon, MultiPolygon
+from shapely.geometry.base import BaseGeometry
+from shapely.validation import make_valid
+import fiona
+import time
+from shapely import wkt as shapely_wkt
+from shapely import wkb as shapely_wkb
 from sqlalchemy import text
 import numpy as np
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -435,6 +442,85 @@ def prepare_gdf_for_postgis(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     gdf = gdf.set_geometry('geom')
 
     return gdf
+
+
+def _coerce_geometry_value(val):
+    if val is None:
+        return None
+    if isinstance(val, BaseGeometry) or hasattr(val, "geom_type"):
+        return val
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        try:
+            return shapely_wkb.loads(bytes(val))
+        except Exception:
+            return None
+    if isinstance(val, str):
+        try:
+            return shapely_wkt.loads(val)
+        except Exception:
+            return None
+    if isinstance(val, (dict, list, tuple)):
+        try:
+            return shape(val)
+        except Exception:
+            return None
+    return None
+
+
+def _read_geofile(path: str):
+    def _read_with_fiona_manual(fp: str):
+        records = []
+        geoms = []
+        crs_val = None
+
+        def add_geom(props, geom_obj):
+            if geom_obj is None:
+                return
+            records.append(dict(props))
+            geoms.append(geom_obj)
+
+        with fiona.open(fp) as src:
+            crs_val = src.crs_wkt or src.crs
+            for feat in src:
+                props = feat.get("properties") or {}
+                geom = feat.get("geometry")
+                if geom is None:
+                    continue
+                try:
+                    gi = geom.__geo_interface__ if hasattr(geom, "__geo_interface__") else geom
+                    gtype = gi.get("type")
+                    coords = gi.get("coordinates")
+                    if gtype == "Polygon":
+                        if coords:
+                            exterior = coords[0] if len(coords) > 0 else []
+                            holes = coords[1:] if len(coords) > 1 else []
+                            add_geom(props, Polygon(exterior, holes))
+                    elif gtype == "MultiPolygon":
+                        for poly_coords in coords or []:
+                            if not poly_coords:
+                                continue
+                            exterior = poly_coords[0] if len(poly_coords) > 0 else []
+                            holes = poly_coords[1:] if len(poly_coords) > 1 else []
+                            try:
+                                add_geom(props, Polygon(exterior, holes))
+                            except Exception:
+                                continue
+                    else:
+                        add_geom(props, shape(gi))
+                except Exception:
+                    continue
+
+        if not geoms:
+            return gpd.GeoDataFrame(columns=list(records[0].keys()) if records else [], geometry=gpd.GeoSeries([], crs=crs_val))
+        return gpd.GeoDataFrame(records, geometry=gpd.GeoSeries(geoms, crs=crs_val))
+
+    # GPKG / GeoJSON : on laisse geopandas gérer
+    lower_path = str(path).lower()
+    if lower_path.endswith((".gpkg", ".geojson", ".json", ".geojsonl")):
+        return gpd.read_file(path)
+
+    # Shapefile et assimilés : lecteur manuel robuste
+    return _read_with_fiona_manual(path)
 
 
 def import_shapefile_to_postgis(shp_path: str, table_name: str, schema: str = "gracethd"):
@@ -5038,27 +5124,141 @@ def resilience():
 @app.route('/upload_resilience', methods=['POST'])
 def upload_resilience():
     files = request.files.getlist('files')
-    names = {key: request.form[key] for key in request.form if key.startswith('name-')}
+    names = {}
+    legacy_names = []
+    names_raw = request.form.get('names')
+    if names_raw:
+        try:
+            names = json.loads(names_raw)
+            if not isinstance(names, dict):
+                return jsonify({'status': 'error', 'message': 'Format de noms invalide (attendu: objet JSON).'})
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': f'Noms invalides : {str(e)}'})
+    else:
+        legacy_items = [(k, request.form[k]) for k in request.form if k.startswith('name-')]
+        legacy_items.sort(key=lambda kv: int(kv[0].split('-')[1]) if kv[0].split('-')[1].isdigit() else 0)
+        legacy_names = [v for _, v in legacy_items if v]
 
     from werkzeug.utils import secure_filename
     import tempfile
 
+    SHP_EXTS = {'.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx'}
+    SHP_REQUIRED = {'.shp', '.shx', '.dbf'}
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        for idx, file in enumerate(files):
-            name = names.get(f'name-{idx}')
-            if not name:
-                return jsonify({'status': 'error', 'message': f'Nom manquant pour {file.filename}'})
-
-            filepath = os.path.join(tmpdir, secure_filename(file.filename))
+        saved_files = []
+        seen_names = set()
+        for file in files:
+            orig_name = os.path.basename(file.filename or "")
+            if not orig_name:
+                continue
+            safe_name = secure_filename(orig_name)
+            if not safe_name:
+                continue
+            if safe_name in seen_names:
+                return jsonify({'status': 'error', 'message': f'Fichier en double : {orig_name}'})
+            seen_names.add(safe_name)
+            filepath = os.path.join(tmpdir, safe_name)
             file.save(filepath)
+            saved_files.append(filepath)
 
+        if not saved_files:
+            return jsonify({'status': 'error', 'message': 'Aucun fichier reçu.'})
+
+        stems = {}
+        gpkg_files = []
+        for p in saved_files:
+            fname = os.path.basename(p)
+            stem, ext = os.path.splitext(fname)
+            ext = ext.lower()
+            if ext == '.gpkg':
+                gpkg_files.append(p)
+                continue
+            if ext in SHP_EXTS:
+                stems.setdefault(stem, set()).add(ext)
+
+        shapefile_stems = [s for s, exts in stems.items() if '.shp' in exts]
+        missing_required = {
+            stem: sorted(SHP_REQUIRED - exts)
+            for stem, exts in stems.items()
+            if '.shp' in exts and not SHP_REQUIRED.issubset(exts)
+        }
+        if missing_required:
+            details = "; ".join([f"{stem}: manque {', '.join(m)}" for stem, m in missing_required.items()])
+            return jsonify({'status': 'error', 'message': f'Shapefile incomplet ({details})'})
+
+        datasets = []
+        for stem in sorted(shapefile_stems):
+            shp_path = os.path.join(tmpdir, f"{stem}.shp")
+            if not os.path.exists(shp_path):
+                continue
+            datasets.append({
+                "path": shp_path,
+                "key": f"{stem}.shp",
+                "default_name": stem
+            })
+
+        for p in sorted(gpkg_files):
+            base = os.path.basename(p)
+            datasets.append({
+                "path": p,
+                "key": base,
+                "default_name": os.path.splitext(base)[0]
+            })
+
+        if not datasets:
+            return jsonify({'status': 'error', 'message': 'Aucun fichier GPKG ou shapefile détecté.'})
+
+        for ds in datasets:
+            name = (names.get(ds["key"]) or names.get(ds["default_name"]) or "")
+            if not name and legacy_names:
+                name = legacy_names.pop(0)
+            name = (name or "").strip()
+            if not name:
+                return jsonify({'status': 'error', 'message': f'Nom manquant pour {ds["key"]}'})
             try:
-                gdf = gpd.read_file(filepath)
-                gdf = gdf.to_crs(epsg=2154)
+                try:
+                    gdf = _read_geofile(ds["path"])
+                except Exception as read_err:
+                    return jsonify({'status': 'error', 'message': f'Erreur lecture {os.path.basename(ds["path"])} : {str(read_err)}'})
+                if gdf.geometry.name != 'geometry':
+                    if 'geometry' in gdf.columns:
+                        new_col = 'geometry_attr'
+                        i = 1
+                        while new_col in gdf.columns:
+                            new_col = f'geometry_attr{i}'
+                            i += 1
+                        gdf = gdf.rename(columns={'geometry': new_col})
+                    gdf = gdf.rename_geometry('geometry')
+                if 'geometry' not in gdf.columns:
+                    return jsonify({'status': 'error', 'message': f'Géométrie introuvable pour {ds["key"]}'} )
+
+                # Coercion + réparation des géométries
+                geom_series = gpd.GeoSeries(gdf['geometry'].apply(_coerce_geometry_value), crs=gdf.crs)
+                try:
+                    geom_series = geom_series.make_valid()
+                except Exception:
+                    # fallback buffer(0)
+                    geom_series = geom_series.buffer(0)
+
+                geom_series = geom_series[geom_series.notnull() & ~geom_series.is_empty]
+                if geom_series.empty:
+                    return jsonify({'status': 'error', 'message': f'Géométries invalides pour {ds["key"]}'} )
+
+                gdf = gdf.loc[geom_series.index].reset_index(drop=True)
+                gdf = gdf.set_geometry(geom_series.reset_index(drop=True))
+
+                if gdf.empty:
+                    return jsonify({'status': 'error', 'message': f'Géométries invalides pour {ds["key"]}'} )
+
+                if gdf.crs is None:
+                    gdf = gdf.set_crs(epsg=4326)
+                if gdf.crs.to_epsg() != 2154:
+                    gdf = gdf.to_crs(epsg=2154)
                 with engine.begin() as conn:
                     gdf.to_postgis(name, conn, schema="resilience", if_exists="replace", index=False)
             except Exception as e:
-                return jsonify({'status': 'error', 'message': f'Erreur traitement {file.filename} : {str(e)}'})
+                return jsonify({'status': 'error', 'message': f'Erreur traitement {os.path.basename(ds["path"])} : {str(e)}'})
 
     return jsonify({"status": "ok"})
 
@@ -5267,4 +5467,118 @@ def download_resilience_layer(layer):
 
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ==================== Batch croisement aléas ==================== #
+
+def _list_alea_tables():
+    with engine.connect() as conn:
+        res = conn.execute(text("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema='resilience' AND table_name LIKE 'alea_%'
+            ORDER BY table_name
+        """))
+        return [r[0] for r in res]
+
+
+def _has_column(conn, schema, table, col):
+    q = text("""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema=:schema AND table_name=:table AND column_name=:col
+    """)
+    return conn.execute(q, {"schema": schema, "table": table, "col": col}).first() is not None
+
+
+@app.route('/alea_batch_run', methods=['POST'])
+def alea_batch_run():
+    data = request.get_json(force=True)
+    main = (data or {}).get('main_layer')
+    if not main:
+        return jsonify({'status': 'error', 'message': 'Couche principale manquante'}), 400
+
+    alea_tables = _list_alea_tables()
+    if not alea_tables:
+        return jsonify({'status': 'error', 'message': 'Aucune couche aléa trouvée.'}), 400
+
+    result_table = f"{main}_alea_result"
+
+    logs = []
+    try:
+        with engine.begin() as conn:
+            # vérif existence de la couche principale
+            exists = conn.execute(text("""
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema='resilience' AND table_name=:t
+            """), {"t": main}).first()
+            if not exists:
+                return jsonify({'status': 'error', 'message': f'Couche principale {main} introuvable.'}), 400
+
+            result_table = f"{main}_alea_result"
+            conn.execute(text(f'DROP TABLE IF EXISTS "resilience"."{result_table}" CASCADE'))
+            conn.execute(text(f'''
+                CREATE TABLE "resilience"."{result_table}" AS
+                SELECT *, row_number() OVER () AS __rowid
+                FROM "resilience"."{main}"
+            '''))
+            conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{result_table}_geom_idx" ON "resilience"."{result_table}" USING GIST(geometry)'))
+            conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{result_table}__rowid_idx" ON "resilience"."{result_table}" (__rowid)'))
+
+            for idx, alea in enumerate(alea_tables, 1):
+                start = time.time()
+                col_name = f'alea-{alea}'
+                conn.execute(text(f'ALTER TABLE "resilience"."{result_table}" ADD COLUMN "{col_name}" text'))
+                conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{alea}_geom_idx" ON "resilience"."{alea}" USING GIST(geometry)'))
+
+                value_col = 'alea' if _has_column(conn, 'resilience', alea, 'alea') else None
+                if not value_col:
+                    alt = conn.execute(text("""
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_schema='resilience' AND table_name=:t AND column_name <> 'geometry'
+                        ORDER BY ordinal_position LIMIT 1
+                    """), {"t": alea}).scalar()
+                    value_col = alt or 'id'
+
+                conn.execute(text(f'''
+                    WITH agg AS (
+                        SELECT r.__rowid,
+                               string_agg(DISTINCT a."{value_col}"::text, ',') AS val
+                        FROM "resilience"."{result_table}" r
+                        JOIN "resilience"."{alea}" a
+                          ON ST_Intersects(r.geometry, a.geometry)
+                        GROUP BY r.__rowid
+                    )
+                    UPDATE "resilience"."{result_table}" r
+                    SET "{col_name}" = agg.val
+                    FROM agg
+                    WHERE r.__rowid = agg.__rowid;
+                '''))
+
+                elapsed = round(time.time() - start, 2)
+                logs.append({'layer': alea, 'seconds': elapsed, 'step': idx, 'total': len(alea_tables)})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+    return jsonify({
+        'status': 'ok',
+        'result_table': result_table,
+        'logs': logs,
+        'download_csv': f'/download_alea_result/{result_table}'
+    })
+
+
+@app.route('/download_alea_result/<table>')
+def download_alea_result(table):
+    if not re.match(r'^[A-Za-z0-9_.-]+$', table or ''):
+        return jsonify({'status': 'error', 'message': 'Nom de table invalide'}), 400
+    sql = text(f'SELECT * FROM "resilience"."{table}"')
+    df = pd.read_sql(sql, engine)
+    # Nettoyage : on enlève la géométrie et l'id technique
+    for col in ['geometry', '__rowid']:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    csv_data = df.to_csv(index=False, sep=';', encoding='utf-8-sig')
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-disposition": f"attachment; filename={table}.csv"})
 
