@@ -201,35 +201,41 @@ document.addEventListener('DOMContentLoaded', function () {
             aleaLog.innerHTML = "";
             aleaDownloadLink.style.display = 'none';
 
-            fetch('/alea_batch_run', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ main_layer: main })
-            })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.status !== 'ok') {
-                        throw new Error(data.message || 'Erreur serveur');
+            const es = new EventSource(`/alea_batch_stream?main_layer=${encodeURIComponent(main)}`);
+            es.onmessage = (evt) => {
+                try {
+                    const data = JSON.parse(evt.data);
+                    if (data.status === 'progress') {
+                        const line = `Couche ${data.step}/${data.total} : ${data.layer} — ${data.seconds}s`;
+                        const div = document.createElement('div');
+                        div.textContent = line;
+                        aleaLog.appendChild(div);
+                        aleaProgress.textContent = line;
+                    } else if (data.status === 'done') {
+                        aleaProgress.textContent = "Terminé.";
+                        if (data.download_csv) {
+                            aleaDownloadLink.href = data.download_csv;
+                            aleaDownloadLink.style.display = 'inline';
+                            aleaDownloadLink.textContent = "Télécharger le CSV";
+                        }
+                        es.close();
+                        aleaRunBtn.disabled = false;
+                    } else if (data.status === 'error') {
+                        aleaProgress.textContent = "Erreur";
+                        alert(data.message || 'Erreur serveur');
+                        es.close();
+                        aleaRunBtn.disabled = false;
                     }
-                    // Progression détaillée
-                    const logHtml = data.logs.map(l =>
-                        `<div>Couche ${l.step}/${l.total} : ${l.layer} — ${l.seconds}s</div>`
-                    ).join('');
-                    aleaLog.innerHTML = logHtml;
-                    aleaProgress.textContent = `Terminé : ${data.logs.length} couches traitées.`;
-                    if (data.download_csv) {
-                        aleaDownloadLink.href = data.download_csv;
-                        aleaDownloadLink.style.display = 'inline';
-                        aleaDownloadLink.textContent = "Télécharger le CSV";
-                    }
-                })
-                .catch(err => {
-                    aleaProgress.textContent = "Erreur";
-                    alert(err.message);
-                })
-                .finally(() => {
-                    aleaRunBtn.disabled = false;
-                });
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+            es.onerror = () => {
+                aleaProgress.textContent = "Erreur";
+                alert("Connexion interrompue.");
+                es.close();
+                aleaRunBtn.disabled = false;
+            };
         });
     }
 

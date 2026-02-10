@@ -5566,6 +5566,94 @@ def alea_batch_run():
     })
 
 
+# --- Version streaming pour afficher la progression en temps réel (SSE) ---
+from flask import stream_with_context
+import json
+import uuid
+
+@app.route('/alea_batch_stream')
+def alea_batch_stream():
+    main = request.args.get('main_layer')
+    if not main:
+        return jsonify({'status': 'error', 'message': 'Couche principale manquante'}), 400
+
+    alea_tables = _list_alea_tables()
+    if not alea_tables:
+        return jsonify({'status': 'error', 'message': 'Aucune couche aléa trouvée.'}), 400
+
+    run_id = str(uuid.uuid4())
+    result_table = f"{main}_alea_result"
+
+    def gen():
+        try:
+            with engine.begin() as conn:
+                exists = conn.execute(text("""
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema='resilience' AND table_name=:t
+                """), {"t": main}).first()
+                if not exists:
+                    yield f"data: {json.dumps({'status':'error','message':f'Couche {main} introuvable'})}\n\n"
+                    return
+
+                conn.execute(text(f'DROP TABLE IF EXISTS "resilience"."{result_table}" CASCADE'))
+                conn.execute(text(f'''
+                    CREATE TABLE "resilience"."{result_table}" AS
+                    SELECT *, row_number() OVER () AS __rowid
+                    FROM "resilience"."{main}"
+                '''))
+                conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{result_table}_geom_idx" ON "resilience"."{result_table}" USING GIST(geometry)'))
+                conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{result_table}__rowid_idx" ON "resilience"."{result_table}" (__rowid)'))
+
+                for idx, alea in enumerate(alea_tables, 1):
+                    start = time.time()
+                    col_name = f'alea-{alea}'
+                    conn.execute(text(f'ALTER TABLE "resilience"."{result_table}" ADD COLUMN "{col_name}" text'))
+                    conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{alea}_geom_idx" ON "resilience"."{alea}" USING GIST(geometry)'))
+
+                    value_col = 'alea' if _has_column(conn, 'resilience', alea, 'alea') else None
+                    if not value_col:
+                        alt = conn.execute(text("""
+                            SELECT column_name FROM information_schema.columns
+                            WHERE table_schema='resilience' AND table_name=:t AND column_name <> 'geometry'
+                            ORDER BY ordinal_position LIMIT 1
+                        """), {"t": alea}).scalar()
+                        value_col = alt or 'id'
+
+                    conn.execute(text(f'''
+                        WITH agg AS (
+                            SELECT r.__rowid,
+                                   string_agg(DISTINCT a."{value_col}"::text, ',') AS val
+                            FROM "resilience"."{result_table}" r
+                            JOIN "resilience"."{alea}" a
+                              ON ST_Intersects(r.geometry, a.geometry)
+                            GROUP BY r.__rowid
+                        )
+                        UPDATE "resilience"."{result_table}" r
+                        SET "{col_name}" = agg.val
+                        FROM agg
+                        WHERE r.__rowid = agg.__rowid;
+                    '''))
+
+                    elapsed = round(time.time() - start, 2)
+                    payload = {
+                        'status': 'progress',
+                        'layer': alea,
+                        'seconds': elapsed,
+                        'step': idx,
+                        'total': len(alea_tables)
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{result_table}_geom_idx2" ON "resilience"."{result_table}" USING GIST(geometry)'))
+
+            # fin
+            yield f"data: {json.dumps({'status':'done','result_table':result_table,'download_csv':f'/download_alea_result/{result_table}'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'status':'error','message':str(e)})}\n\n"
+
+    return Response(stream_with_context(gen()), mimetype='text/event-stream')
+
+
 @app.route('/download_alea_result/<table>')
 def download_alea_result(table):
     if not re.match(r'^[A-Za-z0-9_.-]+$', table or ''):
