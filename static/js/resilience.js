@@ -26,33 +26,150 @@ document.addEventListener('DOMContentLoaded', function () {
     const createBtn = document.getElementById('create-view-btn');
     const viewSummary = document.getElementById('view-summary');
 
+    // --- Test aléas ---
+    const aleaMainLayer = document.getElementById('alea-main-layer');
+    const aleaRunBtn = document.getElementById('alea-run-btn');
+    const aleaProgress = document.getElementById('alea-progress');
+    const aleaLog = document.getElementById('alea-log');
+    const aleaDownloadLink = document.getElementById('alea-download-link');
+
     // ========== Upload de fichiers ========== //
+    const SHP_EXTS = new Set(['.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
+    const SHP_REQUIRED = ['.shp', '.shx', '.dbf'];
+    const ALLOWED_EXTS = new Set(['.gpkg', '.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
+    let uploadDatasets = [];
+
+    function getExt(filename) {
+        const idx = filename.lastIndexOf('.');
+        return idx >= 0 ? filename.slice(idx).toLowerCase() : '';
+    }
+
+    function buildDatasets(files) {
+        const shapefileGroups = new Map();
+        const gpkgFiles = [];
+
+        files.forEach((file) => {
+            const ext = getExt(file.name);
+            if (ext === '.gpkg') {
+                gpkgFiles.push(file);
+                return;
+            }
+            if (SHP_EXTS.has(ext)) {
+                const stem = file.name.slice(0, -ext.length);
+                if (!shapefileGroups.has(stem)) {
+                    shapefileGroups.set(stem, { exts: new Set() });
+                }
+                shapefileGroups.get(stem).exts.add(ext);
+            }
+        });
+
+        const datasets = [];
+        shapefileGroups.forEach((group, stem) => {
+            if (!group.exts.has('.shp')) return;
+            const missing = SHP_REQUIRED.filter((ext) => !group.exts.has(ext));
+            datasets.push({
+                key: `${stem}.shp`,
+                type: 'shp',
+                label: `${stem}.shp`,
+                exts: Array.from(group.exts).sort(),
+                missing
+            });
+        });
+
+        gpkgFiles.forEach((file) => {
+            datasets.push({
+                key: file.name,
+                type: 'gpkg',
+                label: file.name,
+                exts: ['.gpkg'],
+                missing: []
+            });
+        });
+
+        return datasets;
+    }
+
     fileInput.addEventListener('change', () => {
         fileNamesContainer.innerHTML = "";
-        Array.from(fileInput.files).forEach((file, index) => {
+        const allFiles = Array.from(fileInput.files);
+        const files = allFiles.filter((file) => ALLOWED_EXTS.has(getExt(file.name)));
+        const ignoredCount = allFiles.length - files.length;
+        uploadDatasets = buildDatasets(files);
+
+        if (!uploadDatasets.length) {
+            fileNamesContainer.innerHTML = "<em>Aucun fichier GPKG ou shapefile détecté.</em>";
+            return;
+        }
+
+        uploadDatasets.forEach((ds) => {
             const div = document.createElement('div');
+            const extsInfo = ds.type === 'shp'
+                ? `Extensions: ${ds.exts.join(', ')}`
+                : 'Format: GPKG';
+            const missingInfo = ds.missing.length
+                ? `<div style="color:#b00; font-size:0.9em;">Manque: ${ds.missing.join(', ')}</div>`
+                : '';
             div.innerHTML = `
-                <label for="name-${index}">Nom pour <strong>${file.name}</strong> :</label>
-                <input type="text" name="name-${index}" data-index="${index}" placeholder="ex: inondation" required>
+                <label>Nom pour <strong>${ds.label}</strong> :</label>
+                <input type="text" data-key="${ds.key}" placeholder="ex: inondation" required>
+                <div style="color:#666; font-size:0.9em;">${extsInfo}</div>
+                ${missingInfo}
             `;
             fileNamesContainer.appendChild(div);
         });
+
+        if (ignoredCount > 0) {
+            const note = document.createElement('div');
+            note.style.color = '#666';
+            note.style.fontSize = '0.9em';
+            note.textContent = `${ignoredCount} fichier(s) ignoré(s) (format non supporté).`;
+            fileNamesContainer.appendChild(note);
+        }
     });
 
     uploadBtn.addEventListener('click', () => {
-        const files = fileInput.files;
-        if (!files.length) return alert("Veuillez sélectionner des fichiers GPKG.");
+        const files = Array.from(fileInput.files).filter((file) => ALLOWED_EXTS.has(getExt(file.name)));
+        if (!files.length) return alert("Veuillez sélectionner des fichiers GPKG ou Shapefile.");
+
+        const missingRequired = uploadDatasets
+            .filter((ds) => ds.type === 'shp' && ds.missing.length)
+            .map((ds) => `${ds.label} (${ds.missing.join(', ')})`);
+        if (missingRequired.length) {
+            alert("Shapefile incomplet : " + missingRequired.join(' | '));
+            return;
+        }
+
+        const inputMap = new Map();
+        fileNamesContainer.querySelectorAll('input[data-key]').forEach((input) => {
+            inputMap.set(input.dataset.key, (input.value || '').trim());
+        });
+
+        const names = {};
+        const missingNames = [];
+        uploadDatasets.forEach((ds) => {
+            const value = inputMap.get(ds.key) || '';
+            if (!value) {
+                missingNames.push(ds.label);
+            } else {
+                names[ds.key] = value;
+            }
+        });
+        if (missingNames.length) {
+            alert("Veuillez donner un nom pour : " + missingNames.join(', '));
+            return;
+        }
 
         const formData = new FormData();
-        Array.from(files).forEach((file, index) => {
-            const nameInput = document.querySelector(`input[name="name-${index}"]`);
-            if (!nameInput || !nameInput.value.trim()) {
-                alert(`Veuillez donner un nom au fichier ${file.name}`);
-                return;
-            }
+        Array.from(files).forEach((file) => {
             formData.append('files', file);
-            formData.append(`name-${index}`, nameInput.value.trim());
         });
+        formData.append('names', JSON.stringify(names));
+
+        // lock UI during upload
+        uploadBtn.disabled = true;
+        const originalLabel = uploadBtn.dataset.label || uploadBtn.textContent;
+        uploadBtn.dataset.label = originalLabel;
+        uploadBtn.textContent = "Import en cours...";
 
         fetch('/upload_resilience', { method: 'POST', body: formData })
             .then(r => r.json())
@@ -64,8 +181,57 @@ document.addEventListener('DOMContentLoaded', function () {
                     alert("Erreur serveur : " + data.message);
                 }
             })
-            .catch(err => alert("Erreur réseau : " + err.message));
+            .catch(err => alert("Erreur réseau : " + err.message))
+            .finally(() => {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = uploadBtn.dataset.label || "Importer dans la Base";
+            });
     });
+
+    // --- Bouton test aléas ---
+    if (aleaRunBtn) {
+        aleaRunBtn.addEventListener('click', () => {
+            const main = aleaMainLayer && aleaMainLayer.value;
+            if (!main) {
+                alert("Sélectionnez une couche principale.");
+                return;
+            }
+            aleaRunBtn.disabled = true;
+            aleaProgress.textContent = "Traitement en cours...";
+            aleaLog.innerHTML = "";
+            aleaDownloadLink.style.display = 'none';
+
+            fetch('/alea_batch_run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ main_layer: main })
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'ok') {
+                        throw new Error(data.message || 'Erreur serveur');
+                    }
+                    // Progression détaillée
+                    const logHtml = data.logs.map(l =>
+                        `<div>Couche ${l.step}/${l.total} : ${l.layer} — ${l.seconds}s</div>`
+                    ).join('');
+                    aleaLog.innerHTML = logHtml;
+                    aleaProgress.textContent = `Terminé : ${data.logs.length} couches traitées.`;
+                    if (data.download_csv) {
+                        aleaDownloadLink.href = data.download_csv;
+                        aleaDownloadLink.style.display = 'inline';
+                        aleaDownloadLink.textContent = "Télécharger le CSV";
+                    }
+                })
+                .catch(err => {
+                    aleaProgress.textContent = "Erreur";
+                    alert(err.message);
+                })
+                .finally(() => {
+                    aleaRunBtn.disabled = false;
+                });
+        });
+    }
 
     // ========== Mise à jour des couches disponibles ========== //
    function updateLayerList() {
@@ -108,6 +274,14 @@ document.addEventListener('DOMContentLoaded', function () {
                         opt3.value = layer;
                         opt3.textContent = layer;
                         layerMain.appendChild(opt3);
+                    }
+
+                    // Pour test aléas
+                    if (aleaMainLayer) {
+                        const opt4 = document.createElement('option');
+                        opt4.value = layer;
+                        opt4.textContent = layer;
+                        aleaMainLayer.appendChild(opt4);
                     }
 
                     // Gestion affichage/suppression
