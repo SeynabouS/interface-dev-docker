@@ -1,20 +1,35 @@
 services:
-  db:
+  db_interface:
     image: postgis/postgis:16-3.4
-    container_name: telecom_db
+    container_name: telecom_db_interface
     environment:
-      POSTGRES_USER: ${DB_USERNAME:-app}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
-      POSTGRES_DB: ${DB_NAME:-telecom_db}
+      POSTGRES_USER: ${DB_USERNAME_INTERFACE:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_INTERFACE:-app}
+      POSTGRES_DB: ${DB_NAME_INTERFACE:-telecom_interface_db}
     ports:
       - "5432:5432"
     volumes:
-      # Persistent PG data
-      - db_data:/var/lib/postgresql/data
-      # First-run initialization scripts (SQL run automatically on empty volume)
-      - ./db/init:/docker-entrypoint-initdb.d
-      # A convenient import folder you can use later with restore scripts
+      - db_interface_data:/var/lib/postgresql/data
+      - ./db/init_interface:/docker-entrypoint-initdb.d
       - ./db/import:/import
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db_resilience:
+    image: postgis/postgis:16-3.4
+    container_name: telecom_db_resilience
+    environment:
+      POSTGRES_USER: ${DB_USERNAME_RESILIENCE:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_RESILIENCE:-app}
+      POSTGRES_DB: ${DB_NAME_RESILIENCE:-telecom_resilience_db}
+    ports:
+      - "5433:5432"
+    volumes:
+      - db_resilience_data:/var/lib/postgresql/data
+      - ./db/init_resilience:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
@@ -30,7 +45,8 @@ services:
     ports:
       - "5050:80"
     depends_on:
-      - db
+      - db_interface
+      - db_resilience
     volumes:
       - pgadmin_data:/var/lib/pgadmin
 
@@ -38,29 +54,62 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: telecom_web
-    # Use your .env for secrets and DB config
+    container_name: telecom_web_interface
     env_file:
       - .env
     environment:
-      # Override host/port in Docker
-      DB_HOST: db
+      DB_HOST: db_interface
       DB_PORT: 5432
-      # Optional: enable the in-UI reset link logic already present in your app
+      DB_USERNAME: ${DB_USERNAME_INTERFACE:-app}
+      DB_PASSWORD: ${DB_PASSWORD_INTERFACE:-app}
+      DB_NAME: ${DB_NAME_INTERFACE:-telecom_interface_db}
+      DB_SEARCH_PATH: gracethd,public
+      AUTH_SCHEMA: gracethd
+      LOGIN_TEMPLATE: login_interface.html
       RESET_LINK_VIA_UI: ${RESET_LINK_VIA_UI:-1}
     depends_on:
-      db:
+      db_interface:
         condition: service_healthy
     ports:
       - "8000:8000"
     volumes:
-      # Persist and share user-uploaded data & temp processing files
       - ./uploads:/app/uploads
       - ./temp_shapefiles:/app/temp_shapefiles
       - ./static:/app/static
-    command: gunicorn -w 2 -b 0.0.0.0:8000 --timeout 300 --graceful-timeout 300 app:app
+    command: gunicorn -w 2 -b 0.0.0.0:8000 --timeout 300 --graceful-timeout 300 app_interface:app
+    restart: unless-stopped
+
+  web_resilience:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telecom_web_resilience
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db_resilience
+      DB_PORT: 5432
+      DB_USERNAME: ${DB_USERNAME_RESILIENCE:-app}
+      DB_PASSWORD: ${DB_PASSWORD_RESILIENCE:-app}
+      DB_NAME: ${DB_NAME_RESILIENCE:-telecom_resilience_db}
+      DB_SEARCH_PATH: resilience,public
+      AUTH_SCHEMA: resilience
+      LOGIN_TEMPLATE: login_resilience.html
+      RESET_LINK_VIA_UI: ${RESET_LINK_VIA_UI:-1}
+    depends_on:
+      db_resilience:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./temp_shapefiles:/app/temp_shapefiles
+      - ./static:/app/static
+      - ./templates:/app/templates
+    command: gunicorn -w 2 -b 0.0.0.0:8000 --timeout 0 --graceful-timeout 300 app_resilience:app
     restart: unless-stopped
 
 volumes:
-  db_data:
+  db_interface_data:
+  db_resilience_data:
   pgadmin_data:

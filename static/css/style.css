@@ -8,8 +8,8 @@
 
 body {
     font-family: 'Poppins', sans-serif;
-    background: linear-gradient(to right, #f4f4f4, #e8e8e8);
-    color: #333;
+    background: linear-gradient(to right, #f6f8fb, #eef1f6);
+    color: #2c3e50;
     line-height: 1.6;
     overflow-x: hidden;
 }
@@ -43,12 +43,13 @@ main {
 }
 
 .container {
-    max-width: 1100px;
+    max-width: 1180px;
     margin: 0 auto;
     background: #fff;
-    border-radius: 15px;
-    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
-    padding: 30px;
+    border-radius: 18px;
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.08);
+    padding: 32px;
+    border: 1px solid #e5e9f2;
 }
 
 /* Titres */
@@ -63,12 +64,57 @@ h2 {
 
 /* Sections */
 .section {
-    background: #f9f9f9;
-    margin: 2rem 0;
-    border-radius: 12px;
-    padding: 25px;
-    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
+    background: #fdfefe;
+    margin: 1.5rem 0;
+    border-radius: 14px;
+    padding: 22px;
+    box-shadow: 0 8px 18px rgba(18, 38, 63, 0.08);
+    border: 1px solid #eef2f7;
 }
+
+/* Layout spécifique à la section aléas */
+.alea-card {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px 18px;
+    align-items: center;
+}
+
+.alea-card label {
+    font-weight: 600;
+    color: #34495e;
+}
+
+.alea-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.chip {
+    background: #eef5ff;
+    color: #1f4b99;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.9rem;
+    border: 1px solid #d8e6ff;
+}
+
+.log-panel {
+    margin-top: 12px;
+    background: #0f172a;
+    color: #e5e7eb;
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid #1e293b;
+}
+
+.log-panel div { margin-bottom: 4px; }
 
 /* Input file style */
 .file-input-container {
@@ -111,24 +157,24 @@ h2 {
 
 /* Boutons uniformes */
 button {
-    width: 250px; /* Taille fixe pour uniformité */
-    height: 50px; /* Hauteur fixe */
-    padding: 0;
+    min-width: 180px;
+    height: 44px;
+    padding: 0 16px;
     border: none;
-    border-radius: 8px;
-    background: linear-gradient(90deg, #005aa3, #003d6b); /* Couleurs SIPPEREC */
+    border-radius: 10px;
+    background: linear-gradient(135deg, #0b68ff, #004aad);
     color: #fff;
-    font-size: 1rem;
-    font-weight: bold;
-    text-transform: uppercase;
+    font-size: 0.95rem;
+    font-weight: 700;
+    text-transform: none;
     cursor: pointer;
-    transition: all 0.3s ease;
-    text-align: center;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: 0 8px 16px rgba(0, 74, 173, 0.25);
 }
 
 button:hover {
-    background: linear-gradient(90deg, #003d6b, #002a4e); /* Couleurs SIPPEREC */
-    transform: translateY(-2px) scale(1.05);
+    transform: translateY(-1px);
+    box-shadow: 0 12px 22px rgba(0, 74, 173, 0.28);
 }
 
 .button-container {

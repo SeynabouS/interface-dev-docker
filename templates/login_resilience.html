@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fr" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connexion - SippeRésiste Résilience</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: { brand: { 400: '#22d3ee', 500: '#06b6d4', 600: '#0891b2' } }
+                }
+            }
+        }
+    </script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    </style>
+</head>
+<body class="bg-slate-950 font-sans text-slate-300 min-h-screen flex items-center justify-center overflow-x-hidden">
+    <div class="fixed inset-0 bg-slate-950 z-0 flex items-center justify-center">
+        <div class="bg-gradient-to-br from-slate-900 to-slate-950 p-12 rounded-2xl border border-slate-800 shadow-2xl w-full max-w-md z-10">
+            <div class="text-center mb-10">
+                <div class="flex justify-center mb-6">
+                    <div class="w-32 h-32 bg-slate-800 rounded-full flex items-center justify-center shadow-2xl border-4 border-brand-500" style="box-shadow: 0 20px 60px rgba(6, 182, 212, 0.8), 0 0 40px rgba(34, 211, 238, 0.5)">
+                        <img src="https://sig.sipperec.com/maps/img/SIPPEREC_NEWLOGO-MONOCHROME_BLANC.png" alt="Logo SIPPEREC" class="h-24 object-contain filter drop-shadow-2xl">
+                    </div>
+                </div>
+                <h1 class="font-bold text-3xl tracking-wider text-brand-400 mb-2">SippeRésiste</h1>
+                <p class="text-slate-500 text-sm">Plateforme d'Analyse de Résilience Réseau</p>
+            </div>
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div class="mb-6 space-y-2">
+                        {% for category, message in messages %}
+                            <div class="{% if category == 'danger' %}bg-red-900/30 border border-red-800 text-red-300{% else %}bg-emerald-900/30 border border-emerald-800 text-emerald-300{% endif %} p-3 rounded-lg text-sm">
+                                {{ message }}
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+
+            <form method="POST" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-400 mb-1">Identifiant</label>
+                    <input type="text" id="username" name="username" required class="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-slate-200 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/30 transition-colors">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-slate-400 mb-1">Mot de passe</label>
+                    <input type="password" id="password" name="password" required class="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-slate-200 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/30 transition-colors">
+                </div>
+
+                <button type="submit" class="w-full bg-brand-600 hover:bg-brand-500 text-white font-bold py-3 rounded-lg mt-6 transition-colors shadow-lg shadow-brand-500/20">
+                    Connexion Sécurisée
+                </button>
+
+                <div class="text-center pt-2">
+                    <a href="{{ url_for('forgot_password') }}" class="text-sm text-brand-400 hover:text-brand-300 transition-colors">Mot de passe oublié ?</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

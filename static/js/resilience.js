@@ -3,6 +3,7 @@
 document.addEventListener('DOMContentLoaded', function () {
     const map = L.map('resilience-map').setView([48.86, 2.35], 10);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    window.__resilienceMap = map;
 
     let layerStore = {}; // Stocke les couches actives
     let mainLayers = [];
@@ -18,20 +19,35 @@ document.addEventListener('DOMContentLoaded', function () {
     const tableSelector = document.getElementById('table-selector');
     const layerControls = document.getElementById('layer-controls');
 
-    // === Nouveau : Formulaire création de vue matérialisée ===
-    const layerMain = document.getElementById('layer-main');
+    // === Sélection des couches pour vue matérialisée ===
     const layerAlea = document.getElementById('layer-alea');
-    const viewNameInput = document.getElementById('view-name');
-    const previewBtn = document.getElementById('preview-view-btn');
-    const createBtn = document.getElementById('create-view-btn');
-    const viewSummary = document.getElementById('view-summary');
+    const aleaAllCheckbox = document.getElementById('alea-all');
 
     // --- Test aléas ---
     const aleaMainLayer = document.getElementById('alea-main-layer');
     const aleaRunBtn = document.getElementById('alea-run-btn');
     const aleaProgress = document.getElementById('alea-progress');
     const aleaLog = document.getElementById('alea-log');
-    const aleaDownloadLink = document.getElementById('alea-download-link');
+    const aleaDownloadCsv = document.getElementById('alea-download-link');
+    const aleaDownloadGpkg = document.getElementById('alea-download-gpkg');
+    const aleaDownloadShp = document.getElementById('alea-download-shp');
+    const aleaViewName = document.getElementById('alea-view-name');
+    const aleaSupportList = document.getElementById('alea-support-list');
+    const aleaSupportCount = document.getElementById('alea-support-count');
+    const aleaSelectedCount = document.getElementById('alea-selected-count');
+    const aleaSelectionHelper = document.getElementById('alea-selection-helper');
+    const aleaClearBtn = document.getElementById('alea-clear-btn');
+    const historyList = document.getElementById('history-list');
+    const historySearchInput = document.getElementById('history-search');
+    const historyRefreshBtn = document.getElementById('history-refresh-btn');
+    const historySelectAll = document.getElementById('history-select-all');
+    const historyDeleteSelectedBtn = document.getElementById('history-delete-selected-btn');
+    const historyResetBtn = document.getElementById('history-reset-btn');
+    const historySelectionInfo = document.getElementById('history-selection-info');
+    const selectedRunIds = new Set();
+    let historySearchTimer = null;
+    const importFeedback = document.getElementById('import-feedback');
+    let importFeedbackTimer = null;
 
     // ========== Upload de fichiers ========== //
     const SHP_EXTS = new Set(['.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
@@ -42,6 +58,242 @@ document.addEventListener('DOMContentLoaded', function () {
     function getExt(filename) {
         const idx = filename.lastIndexOf('.');
         return idx >= 0 ? filename.slice(idx).toLowerCase() : '';
+    }
+
+    function escapeHtml(value) {
+        return String(value)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+    }
+
+    function prettifyLayerName(layer) {
+        const stripped = String(layer).replace(/^alea_/, '');
+        const withSpaces = stripped.replaceAll('_', ' ').replace(/\s+/g, ' ').trim();
+        if (!withSpaces) return String(layer);
+        return withSpaces.replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+
+    function updateAleaSelectedCount() {
+        if (!layerAlea || !aleaSelectedCount) return;
+        const total = layerAlea.options.length;
+        const selected = Array.from(layerAlea.selectedOptions).length;
+        if (aleaAllCheckbox && aleaAllCheckbox.checked) {
+            aleaSelectedCount.textContent = `Toutes (${total})`;
+            return;
+        }
+        aleaSelectedCount.textContent = `${selected}/${total}`;
+    }
+
+    function syncAleaSelectionMode() {
+        const useAll = aleaAllCheckbox ? aleaAllCheckbox.checked : true;
+        if (layerAlea) {
+            layerAlea.disabled = useAll;
+            layerAlea.classList.toggle('is-disabled', useAll);
+        }
+        if (aleaSelectionHelper) {
+            aleaSelectionHelper.textContent = useAll
+                ? "Mode automatique: toutes les couches aléa seront injectées."
+                : "Mode manuel: sélectionnez les couches de support à injecter.";
+        }
+        updateAleaSelectedCount();
+    }
+
+    function renderAleaSupportList() {
+        if (!aleaSupportList) return;
+
+        if (aleaSupportCount) {
+            const total = aleaLayers.length;
+            aleaSupportCount.textContent = `${total} couche${total > 1 ? 's' : ''}`;
+        }
+
+        if (!aleaLayers.length) {
+            aleaSupportList.innerHTML = '<em>Aucune couche de support détectée.</em>';
+            return;
+        }
+
+        aleaSupportList.innerHTML = aleaLayers.map((layer) => {
+            const safeLayer = escapeHtml(layer);
+            const safeTitle = escapeHtml(prettifyLayerName(layer));
+            return `
+                <div class="alea-chip">
+                    <span class="chip-title">${safeTitle}</span>
+                    <a href="#" class="chip-link" data-layer="${safeLayer}">Injecter</a>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function formatRunDate(isoString) {
+        if (!isoString) return '-';
+        const d = new Date(isoString);
+        if (Number.isNaN(d.getTime())) return '-';
+        return d.toLocaleString('fr-FR', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }
+
+    function runStatusBadge(status) {
+        const s = String(status || '').toLowerCase();
+        if (s === 'done' || s === 'succes' || s === 'success') {
+            return '<span class="bg-emerald-900/40 text-emerald-400 border border-emerald-800/50 px-2 py-1 rounded text-xs font-medium">Succès</span>';
+        }
+        if (s === 'error' || s === 'echec' || s === 'failed') {
+            return '<span class="bg-red-900/40 text-red-400 border border-red-800/50 px-2 py-1 rounded text-xs font-medium">Erreur</span>';
+        }
+        return `<span class="bg-slate-800 border border-slate-700 text-slate-300 px-2 py-1 rounded text-xs font-medium">${escapeHtml(status || 'Inconnu')}</span>`;
+    }
+
+    function updateHistorySelectionUi() {
+        const rowCheckboxes = historyList
+            ? Array.from(historyList.querySelectorAll('input.history-select-run[type="checkbox"]'))
+            : [];
+        const checkedCount = rowCheckboxes.filter((cb) => cb.checked).length;
+        const hasRows = rowCheckboxes.length > 0;
+
+        if (historySelectAll) {
+            historySelectAll.disabled = !hasRows;
+            historySelectAll.checked = hasRows && checkedCount === rowCheckboxes.length;
+            historySelectAll.indeterminate = hasRows && checkedCount > 0 && checkedCount < rowCheckboxes.length;
+        }
+
+        if (historyDeleteSelectedBtn) {
+            historyDeleteSelectedBtn.disabled = selectedRunIds.size === 0;
+        }
+
+        if (historySelectionInfo) {
+            if (selectedRunIds.size === 0) {
+                historySelectionInfo.textContent = 'Aucun run sélectionné.';
+            } else {
+                const suffix = selectedRunIds.size > 1 ? 's' : '';
+                historySelectionInfo.textContent = `${selectedRunIds.size} run${suffix} sélectionné${suffix}.`;
+            }
+        }
+    }
+
+    function renderHistoryRows(runs) {
+        if (!historyList) return;
+        if (!Array.isArray(runs) || runs.length === 0) {
+            selectedRunIds.clear();
+            historyList.innerHTML = `
+                <tr>
+                    <td class="py-3 px-4 text-slate-500" colspan="6">Aucun run trouvé.</td>
+                </tr>
+            `;
+            updateHistorySelectionUi();
+            return;
+        }
+
+        const visibleIds = new Set(
+            runs
+                .map((run) => String(run.run_id ?? '').trim())
+                .filter((id) => id.length > 0)
+        );
+        Array.from(selectedRunIds).forEach((id) => {
+            if (!visibleIds.has(id)) {
+                selectedRunIds.delete(id);
+            }
+        });
+
+        historyList.innerHTML = runs.map((run) => {
+            const runIdRaw = String(run.run_id ?? '').trim();
+            const runId = escapeHtml(runIdRaw);
+            const isSelected = runIdRaw.length > 0 && selectedRunIds.has(runIdRaw);
+            const checkedAttr = isSelected ? 'checked' : '';
+            const mainLayer = escapeHtml(run.main_layer || '-');
+            const viewName = escapeHtml(run.view_name || '');
+            const stressRaw = Array.isArray(run.stress_layers)
+                ? run.stress_layers
+                : (typeof run.stress_layers === 'string' ? run.stress_layers.split(',') : []);
+            const stressLayers = stressRaw
+                .map((item) => String(item || '').trim())
+                .filter((item) => item.length > 0);
+            const stressText = stressLayers.length ? stressLayers.join(', ') : '-';
+            const stressBadges = stressLayers.length
+                ? stressLayers.map((layer) =>
+                    `<span class="inline-flex items-center px-2 py-1 rounded border border-brand-800/60 bg-brand-900/20 text-brand-300 text-[11px]">${escapeHtml(layer)}</span>`
+                ).join(' ')
+                : '<span class="text-slate-500">-</span>';
+            const safeStressTitle = escapeHtml(stressText);
+            const createdAt = formatRunDate(run.created_at);
+            const duration = run.duration_seconds ? `${Number(run.duration_seconds).toFixed(2)}s` : '';
+            const csvHref = run.view_name ? `/download_resilience_layer/${encodeURIComponent(run.view_name)}?format=csv` : '#';
+            const gpkgHref = run.view_name ? `/download_resilience_layer/${encodeURIComponent(run.view_name)}?format=gpkg` : '#';
+            const shpHref = run.view_name ? `/download_resilience_layer/${encodeURIComponent(run.view_name)}?format=shp` : '#';
+            const actions = run.view_name ? `
+                <div class="flex justify-end gap-2">
+                    <a class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-2 py-1 rounded text-xs" href="${csvHref}" target="_blank" rel="noopener">CSV</a>
+                    <a class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-2 py-1 rounded text-xs" href="${gpkgHref}" target="_blank" rel="noopener">GPKG</a>
+                    <a class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-2 py-1 rounded text-xs" href="${shpHref}" target="_blank" rel="noopener">SHP</a>
+                    <button type="button" class="history-open-table bg-brand-600/20 text-brand-400 border border-brand-500/30 hover:bg-brand-600 hover:text-white px-2 py-1 rounded text-xs font-medium transition-colors" data-view="${viewName}">Table</button>
+                </div>
+            ` : '<span class="text-slate-600 text-xs">-</span>';
+
+            return `
+                <tr class="hover:bg-slate-800/40 transition-colors">
+                    <td class="py-3 px-4 text-center align-top">
+                        <input type="checkbox" class="history-select-run accent-cyan-500" data-run-id="${runId}" ${checkedAttr}>
+                    </td>
+                    <td class="py-3 px-4">
+                        <div class="font-mono text-brand-400">RUN-${runId}</div>
+                        <div class="text-[11px] text-slate-500">${createdAt}${duration ? ` • ${duration}` : ''}</div>
+                    </td>
+                    <td class="py-3 px-4 text-slate-300">${mainLayer}</td>
+                    <td class="py-3 px-4 text-slate-300 max-w-[520px] whitespace-normal break-words align-top leading-relaxed" title="${safeStressTitle}">${stressBadges}</td>
+                    <td class="py-3 px-4">${runStatusBadge(run.status)}</td>
+                    <td class="py-3 px-4 text-right">${actions}</td>
+                </tr>
+            `;
+        }).join('');
+        updateHistorySelectionUi();
+    }
+
+    function loadResilienceHistory() {
+        if (!historyList) return;
+        const q = historySearchInput ? historySearchInput.value.trim() : '';
+        historyList.innerHTML = `
+            <tr>
+                <td class="py-3 px-4 text-slate-500" colspan="6">Chargement de l'historique...</td>
+            </tr>
+        `;
+        if (historySelectAll) {
+            historySelectAll.checked = false;
+            historySelectAll.indeterminate = false;
+            historySelectAll.disabled = true;
+        }
+        fetch(`/resilience_runs_history?q=${encodeURIComponent(q)}`)
+            .then((r) => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
+            .then((runs) => renderHistoryRows(runs))
+            .catch((e) => {
+                historyList.innerHTML = `
+                    <tr>
+                        <td class="py-3 px-4 text-red-400" colspan="6">Erreur de chargement de l'historique: ${escapeHtml(e.message)}</td>
+                    </tr>
+                `;
+                updateHistorySelectionUi();
+            });
+    }
+
+    window.loadResilienceHistory = loadResilienceHistory;
+
+    function showImportFeedback(message, type = 'success') {
+        if (!importFeedback) return;
+        if (importFeedbackTimer) clearTimeout(importFeedbackTimer);
+        importFeedback.classList.remove('hidden-element', 'success', 'error');
+        importFeedback.classList.add(type === 'error' ? 'error' : 'success');
+        importFeedback.textContent = message;
+        importFeedbackTimer = setTimeout(() => {
+            importFeedback.classList.add('hidden-element');
+        }, 6000);
     }
 
     function buildDatasets(files) {
@@ -111,8 +363,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 : '';
             div.innerHTML = `
                 <label>Nom pour <strong>${ds.label}</strong> :</label>
-                <input type="text" data-key="${ds.key}" placeholder="ex: inondation" required>
+                <input type="text" data-key="${ds.key}" placeholder="optionnel (sinon nom du fichier)">
                 <div style="color:#666; font-size:0.9em;">${extsInfo}</div>
+                <div style="color:#666; font-size:0.85em;">Laisser vide pour utiliser le nom du fichier.</div>
                 ${missingInfo}
             `;
             fileNamesContainer.appendChild(div);
@@ -129,6 +382,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     uploadBtn.addEventListener('click', () => {
         const files = Array.from(fileInput.files).filter((file) => ALLOWED_EXTS.has(getExt(file.name)));
+        if (importFeedback) importFeedback.classList.add('hidden-element');
         if (!files.length) return alert("Veuillez sélectionner des fichiers GPKG ou Shapefile.");
 
         const missingRequired = uploadDatasets
@@ -145,19 +399,12 @@ document.addEventListener('DOMContentLoaded', function () {
         });
 
         const names = {};
-        const missingNames = [];
         uploadDatasets.forEach((ds) => {
             const value = inputMap.get(ds.key) || '';
-            if (!value) {
-                missingNames.push(ds.label);
-            } else {
+            if (value) {
                 names[ds.key] = value;
             }
         });
-        if (missingNames.length) {
-            alert("Veuillez donner un nom pour : " + missingNames.join(', '));
-            return;
-        }
 
         const formData = new FormData();
         Array.from(files).forEach((file) => {
@@ -175,20 +422,220 @@ document.addEventListener('DOMContentLoaded', function () {
             .then(r => r.json())
             .then(data => {
                 if (data.status === 'ok') {
-                    alert("Importation réussie !");
+                    showImportFeedback(`Importation réussie: ${uploadDatasets.length} couche(s) ajoutée(s).`, 'success');
                     updateLayerList();
+                    fileInput.value = '';
+                    fileNamesContainer.innerHTML = '';
+                    uploadDatasets = [];
                 } else {
+                    showImportFeedback("Erreur serveur: " + data.message, 'error');
                     alert("Erreur serveur : " + data.message);
                 }
             })
-            .catch(err => alert("Erreur réseau : " + err.message))
+            .catch(err => {
+                showImportFeedback("Erreur réseau: " + err.message, 'error');
+                alert("Erreur réseau : " + err.message);
+            })
             .finally(() => {
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = uploadBtn.dataset.label || "Importer dans la Base";
             });
     });
 
-    // --- Bouton test aléas ---
+    if (layerAlea) {
+        layerAlea.addEventListener('change', updateAleaSelectedCount);
+    }
+
+    if (aleaAllCheckbox) {
+        aleaAllCheckbox.addEventListener('change', syncAleaSelectionMode);
+    }
+
+    if (aleaClearBtn) {
+        aleaClearBtn.addEventListener('click', () => {
+            if (!layerAlea) return;
+            if (aleaAllCheckbox) aleaAllCheckbox.checked = false;
+            Array.from(layerAlea.options).forEach((opt) => {
+                opt.selected = false;
+            });
+            syncAleaSelectionMode();
+            layerAlea.dispatchEvent(new Event('change'));
+        });
+    }
+
+    if (aleaSupportList) {
+        aleaSupportList.addEventListener('click', (event) => {
+            const link = event.target.closest('.chip-link[data-layer]');
+            if (!link || !layerAlea) return;
+            event.preventDefault();
+
+            const layer = link.dataset.layer;
+            if (!layer) return;
+
+            if (typeof window.switchTab === 'function') {
+                window.switchTab('analyse');
+            }
+
+            if (aleaAllCheckbox) aleaAllCheckbox.checked = false;
+            syncAleaSelectionMode();
+
+            const targetOption = Array.from(layerAlea.options).find((opt) => opt.value === layer);
+            if (targetOption) {
+                targetOption.selected = true;
+                layerAlea.dispatchEvent(new Event('change'));
+            }
+
+            layerAlea.focus();
+        });
+    }
+
+    if (historySearchInput) {
+        historySearchInput.addEventListener('input', () => {
+            if (historySearchTimer) clearTimeout(historySearchTimer);
+            historySearchTimer = setTimeout(() => {
+                loadResilienceHistory();
+            }, 220);
+        });
+    }
+
+    if (historyRefreshBtn) {
+        historyRefreshBtn.addEventListener('click', () => {
+            loadResilienceHistory();
+        });
+    }
+
+    if (historySelectAll) {
+        historySelectAll.addEventListener('change', () => {
+            if (!historyList) return;
+            const runCheckboxes = Array.from(historyList.querySelectorAll('input.history-select-run[type="checkbox"]'));
+            runCheckboxes.forEach((cb) => {
+                cb.checked = historySelectAll.checked;
+                const runId = String(cb.dataset.runId || '').trim();
+                if (!runId) return;
+                if (cb.checked) {
+                    selectedRunIds.add(runId);
+                } else {
+                    selectedRunIds.delete(runId);
+                }
+            });
+            updateHistorySelectionUi();
+        });
+    }
+
+    if (historyDeleteSelectedBtn) {
+        historyDeleteSelectedBtn.addEventListener('click', () => {
+            const runIds = Array.from(selectedRunIds)
+                .map((id) => Number.parseInt(id, 10))
+                .filter((id) => Number.isInteger(id) && id > 0);
+            if (!runIds.length) {
+                alert('Sélectionnez au moins un run à supprimer.');
+                return;
+            }
+
+            if (!confirm(`Supprimer ${runIds.length} run(s) sélectionné(s) ? Cette action est irréversible.`)) {
+                return;
+            }
+
+            historyDeleteSelectedBtn.disabled = true;
+            fetch('/resilience_runs_delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ run_ids: runIds })
+            })
+                .then(async (r) => {
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok || data.status !== 'ok') {
+                        throw new Error(data.message || `HTTP ${r.status}`);
+                    }
+                    return data;
+                })
+                .then((data) => {
+                    alert(`${data.deleted_count || 0} run(s) supprimé(s).`);
+                    selectedRunIds.clear();
+                    loadResilienceHistory();
+                })
+                .catch((e) => {
+                    alert(`Erreur suppression: ${e.message}`);
+                })
+                .finally(() => {
+                    historyDeleteSelectedBtn.disabled = selectedRunIds.size === 0;
+                    updateHistorySelectionUi();
+                });
+        });
+    }
+
+    if (historyResetBtn) {
+        historyResetBtn.addEventListener('click', () => {
+            if (!confirm("Réinitialiser tout l'historique des runs ? Cette action est irréversible.")) {
+                return;
+            }
+
+            historyResetBtn.disabled = true;
+            fetch('/resilience_runs_reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+                .then(async (r) => {
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok || data.status !== 'ok') {
+                        throw new Error(data.message || `HTTP ${r.status}`);
+                    }
+                    return data;
+                })
+                .then(() => {
+                    alert('Historique réinitialisé.');
+                    selectedRunIds.clear();
+                    loadResilienceHistory();
+                })
+                .catch((e) => {
+                    alert(`Erreur réinitialisation: ${e.message}`);
+                })
+                .finally(() => {
+                    historyResetBtn.disabled = false;
+                    updateHistorySelectionUi();
+                });
+        });
+    }
+
+    if (historyList) {
+        historyList.addEventListener('change', (event) => {
+            const cb = event.target.closest('input.history-select-run[type="checkbox"]');
+            if (!cb) return;
+            const runId = String(cb.dataset.runId || '').trim();
+            if (!runId) return;
+            if (cb.checked) {
+                selectedRunIds.add(runId);
+            } else {
+                selectedRunIds.delete(runId);
+            }
+            updateHistorySelectionUi();
+        });
+
+        historyList.addEventListener('click', (event) => {
+            const btn = event.target.closest('.history-open-table[data-view]');
+            if (!btn) return;
+            const view = btn.dataset.view;
+            if (!view) return;
+
+            if (typeof window.switchTab === 'function') {
+                window.switchTab('analyse');
+            }
+            updateLayerList();
+            setTimeout(() => {
+                const exists = Array.from(tableSelector.options).find((opt) => opt.value === view);
+                if (!exists) {
+                    const opt = document.createElement('option');
+                    opt.value = view;
+                    opt.textContent = view;
+                    tableSelector.appendChild(opt);
+                }
+                tableSelector.value = view;
+                loadAttributeTable(view);
+            }, 350);
+        });
+    }
+
+    // --- Création vue matérialisée aléas ---
     if (aleaRunBtn) {
         aleaRunBtn.addEventListener('click', () => {
             const main = aleaMainLayer && aleaMainLayer.value;
@@ -196,65 +643,104 @@ document.addEventListener('DOMContentLoaded', function () {
                 alert("Sélectionnez une couche principale.");
                 return;
             }
-            aleaRunBtn.disabled = true;
-            aleaProgress.textContent = "Traitement en cours...";
-            aleaLog.innerHTML = "";
-            aleaDownloadLink.style.display = 'none';
+            const viewName = (aleaViewName && aleaViewName.value.trim()) || `${main}_alea_view`;
+            const selectedAlea = Array.from(layerAlea ? layerAlea.selectedOptions : []).map(o => o.value);
+            const useAll = aleaAllCheckbox ? aleaAllCheckbox.checked : true;
 
-            fetch('/alea_batch_run', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ main_layer: main })
-            })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.status !== 'ok') {
-                        throw new Error(data.message || 'Erreur serveur');
+            if (!useAll && selectedAlea.length === 0) {
+                alert("Sélectionnez au moins une couche aléa, ou activez l'option 'Prendre toutes les couches aléa'.");
+                return;
+            }
+
+            aleaRunBtn.disabled = true;
+            aleaProgress.textContent = "Création de la vue en cours...";
+            aleaProgress.style.display = 'inline-block';
+            aleaLog.innerHTML = "";
+            if (aleaDownloadCsv) aleaDownloadCsv.style.display = 'none';
+            if (aleaDownloadGpkg) aleaDownloadGpkg.style.display = 'none';
+            if (aleaDownloadShp) aleaDownloadShp.style.display = 'none';
+
+            const params = new URLSearchParams({ main_layer: main, view_name: viewName });
+            if (!useAll && selectedAlea.length) {
+                params.set('alea_tables', selectedAlea.join(','));
+            }
+
+            const es = new EventSource(`/alea_view_batch_stream?${params.toString()}`);
+            es.onmessage = (evt) => {
+                try {
+                    const data = JSON.parse(evt.data);
+                    if (data.status === 'progress') {
+                        const line = `Couche ${data.step}/${data.total} : ${data.layer} — ${data.seconds}s`;
+                        const div = document.createElement('div');
+                        div.textContent = line;
+                        aleaLog.appendChild(div);
+                        aleaProgress.textContent = line;
+                        aleaProgress.style.display = 'inline-block';
+                    } else if (data.status === 'done') {
+                        aleaProgress.textContent = `Vue "${data.view}" créée.`;
+                        aleaProgress.style.display = 'inline-block';
+                        if (aleaDownloadCsv && data.download_csv) {
+                            aleaDownloadCsv.href = data.download_csv;
+                            aleaDownloadCsv.textContent = "Télécharger CSV";
+                            aleaDownloadCsv.style.display = 'inline';
+                        }
+                        if (aleaDownloadGpkg && data.download_gpkg) {
+                            aleaDownloadGpkg.href = data.download_gpkg;
+                            aleaDownloadGpkg.textContent = "Télécharger GPKG";
+                            aleaDownloadGpkg.style.display = 'inline';
+                        }
+                        if (aleaDownloadShp && data.download_shp) {
+                            aleaDownloadShp.href = data.download_shp;
+                            aleaDownloadShp.textContent = "Télécharger Shapefile";
+                            aleaDownloadShp.style.display = 'inline';
+                        }
+                        updateLayerList();
+                        loadResilienceHistory();
+                        es.close();
+                        aleaRunBtn.disabled = false;
+                    } else if (data.status === 'error') {
+                        aleaProgress.textContent = "Erreur";
+                        aleaProgress.style.display = 'inline-block';
+                        alert(data.message || 'Erreur serveur');
+                        loadResilienceHistory();
+                        es.close();
+                        aleaRunBtn.disabled = false;
                     }
-                    // Progression détaillée
-                    const logHtml = data.logs.map(l =>
-                        `<div>Couche ${l.step}/${l.total} : ${l.layer} — ${l.seconds}s</div>`
-                    ).join('');
-                    aleaLog.innerHTML = logHtml;
-                    aleaProgress.textContent = `Terminé : ${data.logs.length} couches traitées.`;
-                    if (data.download_csv) {
-                        aleaDownloadLink.href = data.download_csv;
-                        aleaDownloadLink.style.display = 'inline';
-                        aleaDownloadLink.textContent = "Télécharger le CSV";
-                    }
-                })
-                .catch(err => {
-                    aleaProgress.textContent = "Erreur";
-                    alert(err.message);
-                })
-                .finally(() => {
-                    aleaRunBtn.disabled = false;
-                });
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+            es.onerror = () => {
+                aleaProgress.textContent = "Erreur";
+                aleaProgress.style.display = 'inline-block';
+                alert("Connexion interrompue.");
+                es.close();
+                aleaRunBtn.disabled = false;
+            };
         });
     }
 
     // ========== Mise à jour des couches disponibles ========== //
-   function updateLayerList() {
-        // Selecteurs
-        const layerMain = document.getElementById('layer-main');
-        const layerAlea = document.getElementById('layer-alea');
-        const layerSelect = document.getElementById('layer-selector');
-        const tableSelector = document.getElementById('table-selector');
-        const layerControls = document.getElementById('layer-controls');
-        const aleaSupportList = document.getElementById('alea-support-list');
+    function updateLayerList() {
         layerSelect.innerHTML = '';
         tableSelector.innerHTML = '';
         layerControls.innerHTML = '';
-        if (layerMain) layerMain.innerHTML = '';
         if (layerAlea) layerAlea.innerHTML = '';
-        aleaSupportList.innerHTML = '';
+        if (aleaMainLayer) aleaMainLayer.innerHTML = '';
+        if (aleaSupportList) aleaSupportList.innerHTML = '<em>Chargement des couches de support...</em>';
+        if (aleaSupportCount) aleaSupportCount.textContent = '...';
+
         layerStore = {};
+        mainLayers = [];
+        aleaLayers = [];
+        syncAleaSelectionMode();
 
         // Charger couches principales (gauche)
         fetch('/resilience_layers')
             .then(r => r.json())
-            .then(mainLayers => {
-                // Pour le select principal
+            .then(layers => {
+                mainLayers = Array.isArray(layers) ? layers : [];
+
                 mainLayers.forEach(layer => {
                     // Pour visualisation sur carte
                     const opt = document.createElement('option');
@@ -267,14 +753,6 @@ document.addEventListener('DOMContentLoaded', function () {
                     opt2.value = layer;
                     opt2.textContent = layer;
                     tableSelector.appendChild(opt2);
-
-                    // Pour création de vue matérialisée
-                    if (layerMain) {
-                        const opt3 = document.createElement('option');
-                        opt3.value = layer;
-                        opt3.textContent = layer;
-                        layerMain.appendChild(opt3);
-                    }
 
                     // Pour test aléas
                     if (aleaMainLayer) {
@@ -295,6 +773,8 @@ document.addEventListener('DOMContentLoaded', function () {
                             <option value="">⬇ Format</option>
                             <option value="csv">CSV</option>
                             <option value="html">HTML</option>
+                            <option value="gpkg">GPKG</option>
+                            <option value="shp">Shapefile</option>
                         </select>
                         <button class="delete-layer-btn" data-layer="${layer}" style="margin-left:10px;">🗑 Supprimer</button>
                     `;
@@ -305,17 +785,10 @@ document.addEventListener('DOMContentLoaded', function () {
         // Charger couches support (droite)
         fetch('/resilience_layers_support')
             .then(r => r.json())
-            .then(aleaLayers => {
-                // Affichage juste en mode info à droite
-                if (aleaSupportList) {
-                    if (aleaLayers.length === 0) {
-                        aleaSupportList.innerHTML = '<em>Aucune couche de support détectée.</em>';
-                    } else {
-                        aleaSupportList.innerHTML = aleaLayers
-                            .map(layer => `<span style="background:#eef; border-radius:8px; padding:3px 9px; margin:2px 0; display:inline-block;">${layer}</span>`)
-                            .join(' ');
-                    }
-                }
+            .then(supportLayers => {
+                aleaLayers = Array.isArray(supportLayers) ? supportLayers : [];
+                renderAleaSupportList();
+
                 // Pour création de vue matérialisée (multi-select)
                 if (layerAlea) {
                     aleaLayers.forEach(layer => {
@@ -325,6 +798,7 @@ document.addEventListener('DOMContentLoaded', function () {
                         layerAlea.appendChild(opt);
                     });
                 }
+
                 // Pour la table attributaire (lecture seule)
                 aleaLayers.forEach(layer => {
                     const opt2 = document.createElement('option');
@@ -332,111 +806,18 @@ document.addEventListener('DOMContentLoaded', function () {
                     opt2.textContent = layer + " (support)";
                     tableSelector.appendChild(opt2);
                 });
+
+                syncAleaSelectionMode();
             })
-            .catch(err => {
-                if (aleaSupportList) aleaSupportList.innerHTML = '<span style="color:red">Erreur lors du chargement des couches support.</span>';
+            .catch(() => {
+                aleaLayers = [];
+                if (aleaSupportList) aleaSupportList.innerHTML = '<em>Erreur lors du chargement des couches support.</em>';
+                if (aleaSupportCount) aleaSupportCount.textContent = 'Erreur';
+                syncAleaSelectionMode();
             });
     }
 
 
-
-    // === Gestion création de vue matérialisée ===
-
-    // Déclaration d'une variable pour suivre l'état
-    let previewData = null;
-
-    previewBtn.addEventListener('click', function() {
-        const mainTable = layerMain.value;
-        const aleaTables = Array.from(layerAlea.selectedOptions).map(o => o.value);
-        const viewName = viewNameInput.value.trim();
-
-        if (!mainTable || aleaTables.length === 0 || !viewName) {
-            alert("Veuillez choisir une table principale, au moins une couche alea et un nom de vue.");
-            return;
-        }
-
-        // Si le contenu est déjà chargé, on toggle simplement l'affichage
-        if (previewData && viewSummary.innerHTML.includes('preview-content')) {
-            const previewContent = document.getElementById('preview-content');
-            const isVisible = previewContent.style.display !== 'none';
-            
-            previewContent.style.display = isVisible ? 'none' : '';
-            previewBtn.innerHTML = isVisible 
-                ? 'Aperçu de la vue matérialisée ▲' 
-                : 'Aperçu de la vue matérialisée ▼';
-            return;
-        }
-
-        // Sinon, on fait la requête pour charger les données
-        fetch('/create_resilience_view', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                main_table: mainTable,
-                alea_tables: aleaTables,
-                view_name: viewName,
-                preview_only: true
-            })
-        })
-        .then(r => r.json())
-        .then(res => {
-            if (res.status === 'preview') {
-                previewData = res; // On stocke les données pour éviter de recharger
-                
-                viewSummary.innerHTML = `
-                    <div id="preview-content" style="margin-top:8px;">
-                        <strong>Dépendances :</strong> ${res.dependencies.join(', ')}<br>
-                        <strong>Description&nbsp;:</strong><br>
-                        <div style="margin:8px 0 12px 0; color:#235;">
-                            ${res.description}
-                        </div>
-                        <strong>SQL généré :</strong>
-                        <div class="sql-preview-block">${res.sql}</div>
-                    </div>
-                `;
-                
-                // On met à jour le texte du bouton avec la flèche
-                previewBtn.innerHTML = 'Aperçu de la vue matérialisée ▼';
-            } else {
-                viewSummary.innerHTML = `<span style="color:red;">Erreur : ${res.message}</span>`;
-            }
-        })
-        .catch(e => {
-            viewSummary.innerHTML = `<span style="color:red;">Erreur réseau : ${e.message}</span>`;
-        });
-    });
-
-    createBtn.addEventListener('click', () => {
-        const mainTable = layerMain.value;
-        const aleaTables = Array.from(layerAlea.selectedOptions).map(o => o.value);
-        const viewName = viewNameInput.value.trim();
-
-        if (!mainTable || aleaTables.length === 0 || !viewName) {
-            alert("Veuillez choisir une table principale, au moins une couche alea et un nom de vue.");
-            return;
-        }
-
-        fetch('/create_resilience_view', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                main_table: mainTable,
-                alea_tables: aleaTables,
-                view_name: viewName
-            })
-        })
-        .then(r => r.json())
-        .then(res => {
-            if (res.status === 'ok') {
-                alert("✅ Vue créée avec succès.");
-                viewSummary.innerHTML = '';
-                updateLayerList();
-            } else {
-                alert("❌ Erreur : " + res.message + "\n\n" + (res.sql || ""));
-            }
-        })
-        .catch(e => alert("Erreur réseau : " + e.message));
-    });
 
     // ========== Le reste de tes fonctionnalités Leaflet, download, suppression, table attributaire... ==========
 
@@ -571,5 +952,6 @@ document.addEventListener('DOMContentLoaded', function () {
             });
     });
 
+    updateHistorySelectionUi();
     updateLayerList(); // démarrage
 });

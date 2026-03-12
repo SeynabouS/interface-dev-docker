@@ -15,7 +15,7 @@ import base64
 import csv
 from sqlalchemy import inspect
 from io import StringIO  
-from shapely.geometry import shape, Polygon, MultiPolygon, LineString, Point
+from shapely.geometry import shape, Polygon, MultiPolygon, LineString, MultiLineString, Point, MultiPoint
 from shapely.geometry.base import BaseGeometry
 from shapely.validation import make_valid
 import fiona
@@ -49,6 +49,8 @@ SIDE_CAR_EXTS = {'.dbf', '.shx', '.prj', '.cpg', '.sbn', '.sbx'}
 # --- Options app ---
 app.config['RESET_LINK_VIA_UI'] = os.getenv('RESET_LINK_VIA_UI', '0') == '1'
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "change-me-in-prod")
+LOGIN_TEMPLATE = os.getenv("LOGIN_TEMPLATE", "login.html")
+AUTH_SCHEMA = os.getenv("AUTH_SCHEMA", "gracethd")
 
 # --- Logging simple et lisible ---
 logging.basicConfig(
@@ -79,6 +81,21 @@ engine = create_engine(app.config['SQLALCHEMY_DATABASE_URI'], pool_pre_ping=True
 
 # --- Base URL pour appels HTTP internes (à la place de 127.0.0.1:5000 en dev) ---
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000")
+_KEY_COLUMN_CACHE: dict[tuple[str, str], str | None] = {}
+
+def _quote_ident(identifier: str) -> str:
+    """
+    Quote un identifiant SQL (schema/table/colonne/index) en échappant les guillemets.
+    """
+    ident = str(identifier or "")
+    if not ident or "\x00" in ident:
+        raise ValueError("Identifiant SQL invalide.")
+    return '"' + ident.replace('"', '""') + '"'
+
+
+def _qualified_ident(schema: str, name: str) -> str:
+    return f"{_quote_ident(schema)}.{_quote_ident(name)}"
+
 
 @app.get("/healthz")
 def healthz():
@@ -104,7 +121,7 @@ def init_db_cli():
 # Modèle utilisateur
 class User(db.Model):
     __tablename__ = 'users'
-    __table_args__ = {'schema': 'gracethd'}
+    __table_args__ = {'schema': AUTH_SCHEMA}
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(50), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
@@ -156,7 +173,7 @@ def login():
         else:
             flash('Identifiants incorrects', 'danger')
 
-    return render_template('login.html')
+    return render_template(LOGIN_TEMPLATE)
 
 # Route de déconnexion
 @app.route('/logout')
@@ -467,15 +484,75 @@ def _coerce_geometry_value(val):
     return None
 
 
+def _geom_family(geom):
+    if geom is None or not hasattr(geom, "geom_type"):
+        return None
+    gtype = str(geom.geom_type).upper()
+    if "LINE" in gtype:
+        return "LINE"
+    if "POLYGON" in gtype:
+        return "POLYGON"
+    if "POINT" in gtype:
+        return "POINT"
+    return None
+
+
+def _pick_family_geom(geom, family):
+    if geom is None:
+        return None
+    if family is None:
+        return geom
+    fam = _geom_family(geom)
+    if fam == family:
+        return geom
+    if str(getattr(geom, "geom_type", "")).upper() != "GEOMETRYCOLLECTION":
+        return None
+    candidates = [g for g in getattr(geom, "geoms", []) if g is not None and not g.is_empty and _geom_family(g) == family]
+    if not candidates:
+        return None
+    if family == "POLYGON":
+        return max(candidates, key=lambda g: float(getattr(g, "area", 0.0) or 0.0))
+    if family == "LINE":
+        return max(candidates, key=lambda g: float(getattr(g, "length", 0.0) or 0.0))
+    return candidates[0]
+
+
+def _repair_geometry_preserve_family(geom):
+    """
+    Répare une géométrie sans changer sa famille d'origine.
+    Exemple: une LINESTRING reste ligne (LINESTRING/MULTILINESTRING), pas point.
+    """
+    original = _coerce_geometry_value(geom)
+    if original is None:
+        return None
+
+    family = _geom_family(original)
+    repaired = original
+
+    try:
+        candidate = make_valid(original)
+        if candidate is not None:
+            picked = _pick_family_geom(candidate, family)
+            if picked is not None:
+                repaired = picked
+    except Exception:
+        repaired = original
+
+    try:
+        if repaired is None or repaired.is_empty:
+            return None
+    except Exception:
+        return None
+    return _coerce_geometry_value(repaired)
+
+
 def _read_geofile(path: str):
     def _read_with_fiona_manual(fp: str):
         records = []
         geoms = []
         crs_val = None
 
-        def add_geom(props, geom_obj):
-            if geom_obj is None:
-                return
+        def add_row(props, geom_obj):
             records.append(dict(props))
             geoms.append(geom_obj)
 
@@ -485,33 +562,18 @@ def _read_geofile(path: str):
                 props = feat.get("properties") or {}
                 geom = feat.get("geometry")
                 if geom is None:
+                    add_row(props, None)
                     continue
                 try:
                     gi = geom.__geo_interface__ if hasattr(geom, "__geo_interface__") else geom
-                    gtype = gi.get("type")
-                    coords = gi.get("coordinates")
-                    if gtype == "Polygon":
-                        if coords:
-                            exterior = coords[0] if len(coords) > 0 else []
-                            holes = coords[1:] if len(coords) > 1 else []
-                            add_geom(props, Polygon(exterior, holes))
-                    elif gtype == "MultiPolygon":
-                        for poly_coords in coords or []:
-                            if not poly_coords:
-                                continue
-                            exterior = poly_coords[0] if len(poly_coords) > 0 else []
-                            holes = poly_coords[1:] if len(poly_coords) > 1 else []
-                            try:
-                                add_geom(props, Polygon(exterior, holes))
-                            except Exception:
-                                continue
-                    else:
-                        add_geom(props, shape(gi))
+                    g = _repair_geometry_preserve_family(shape(gi))
+                    add_row(props, g)
                 except Exception:
+                    add_row(props, None)
                     continue
 
-        if not geoms:
-            return gpd.GeoDataFrame(columns=list(records[0].keys()) if records else [], geometry=gpd.GeoSeries([], crs=crs_val))
+        if not records:
+            return gpd.GeoDataFrame(columns=[], geometry=gpd.GeoSeries([], crs=crs_val))
         return gpd.GeoDataFrame(records, geometry=gpd.GeoSeries(geoms, crs=crs_val))
 
     # GPKG / GeoJSON : on laisse geopandas gérer, sinon fallback sûr
@@ -540,7 +602,7 @@ def import_shapefile_to_postgis(shp_path: str, table_name: str, schema: str = "g
     with engine.begin() as conn:
         conn.execute(text("SET LOCAL search_path TO gracethd, public"))
         # if_exists='replace' suffit, mais on ajoute un DROP défensif pour les reliquats
-        conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table_name}" CASCADE'))
+        conn.execute(text(f'DROP TABLE IF EXISTS {_qualified_ident(schema, table_name)} CASCADE'))
 
         gdf.to_postgis(
             name=qname,
@@ -5217,7 +5279,8 @@ def upload_resilience():
                 name = legacy_names.pop(0)
             name = (name or "").strip()
             if not name:
-                return jsonify({'status': 'error', 'message': f'Nom manquant pour {ds["key"]}'})
+                # Fallback: si aucun nom saisi, on prend le nom du fichier/couche.
+                name = ds["default_name"]
             try:
                 try:
                     gdf = _read_geofile(ds["path"])
@@ -5235,30 +5298,38 @@ def upload_resilience():
                 if 'geometry' not in gdf.columns:
                     return jsonify({'status': 'error', 'message': f'Géométrie introuvable pour {ds["key"]}'} )
 
-                # Coercion + réparation des géométries
-                geom_series = gpd.GeoSeries(gdf['geometry'].apply(_coerce_geometry_value), crs=gdf.crs)
-                try:
-                    geom_series = geom_series.make_valid()
-                except Exception:
-                    # fallback buffer(0)
-                    geom_series = geom_series.buffer(0)
+                # Coercion + réparation sans supprimer de lignes:
+                # toute géométrie non exploitable reste NULL.
+                def _repair_or_null(geom):
+                    return _repair_geometry_preserve_family(geom)
 
-                geom_series = geom_series[geom_series.notnull() & ~geom_series.is_empty]
-                if geom_series.empty:
-                    return jsonify({'status': 'error', 'message': f'Géométries invalides pour {ds["key"]}'} )
+                geom_series = gpd.GeoSeries(
+                    gdf['geometry'].apply(_repair_or_null),
+                    crs=gdf.crs
+                ).reset_index(drop=True)
 
-                gdf = gdf.loc[geom_series.index].reset_index(drop=True)
-                gdf = gdf.set_geometry(geom_series.reset_index(drop=True))
+                gdf = gdf.reset_index(drop=True).copy()
+                gdf["geometry"] = geom_series
+                gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=geom_series.crs or gdf.crs)
 
                 if gdf.empty:
-                    return jsonify({'status': 'error', 'message': f'Géométries invalides pour {ds["key"]}'} )
+                    return jsonify({'status': 'error', 'message': f'Couche vide pour {ds["key"]}'} )
 
                 if gdf.crs is None:
                     gdf = gdf.set_crs(epsg=4326)
                 if gdf.crs.to_epsg() != 2154:
                     gdf = gdf.to_crs(epsg=2154)
                 with engine.begin() as conn:
-                    gdf.to_postgis(name, conn, schema="resilience", if_exists="replace", index=False)
+                    gdf.to_postgis(
+                        name,
+                        conn,
+                        schema="resilience",
+                        if_exists="replace",
+                        index=False,
+                        dtype={"geometry": Geometry("GEOMETRY", srid=2154)}
+                    )
+                    # Rafraîchit les stats pour accélérer la détection de clé côté batch.
+                    conn.execute(text(f'ANALYZE "resilience".{_quote_ident(name)}'))
             except Exception as e:
                 return jsonify({'status': 'error', 'message': f'Erreur traitement {os.path.basename(ds["path"])} : {str(e)}'})
 
@@ -5275,17 +5346,26 @@ def get_resilience_layers():
             FROM information_schema.tables
             WHERE table_schema = 'resilience'
               AND table_type IN ('BASE TABLE', 'VIEW')
-              AND table_name NOT LIKE 'alea%';
+              AND table_name NOT LIKE 'alea%'
+              AND table_name <> 'users'
+              AND EXISTS (
+                  SELECT 1
+                  FROM information_schema.columns c
+                  WHERE c.table_schema = 'resilience'
+                    AND c.table_name = information_schema.tables.table_name
+                    AND c.column_name = 'geometry'
+              );
         """))
         tables = [row[0] for row in result1]
 
-        # Vues matérialisées (on prend tout)
+        # Vues matérialisées avec géométrie uniquement
         result2 = conn.execute(text("""
             SELECT matviewname 
             FROM pg_matviews
-            WHERE schemaname = 'resilience';
+            WHERE schemaname = 'resilience'
+              AND matviewname <> 'users';
         """))
-        matviews = [row[0] for row in result2]
+        matviews = [row[0] for row in result2 if _has_column(conn, 'resilience', row[0], 'geometry')]
 
     all_layers = sorted(set(tables + matviews))
     return jsonify(all_layers)
@@ -5298,16 +5378,20 @@ def get_resilience_layer_data(layer_name):
         with engine.begin() as conn:
             if not _object_exists('resilience', layer_name):
                 return jsonify({'status': 'error', 'message': f'Couche {layer_name} introuvable.'}), 404
+            if not _has_column(conn, 'resilience', layer_name, 'geometry'):
+                return jsonify({'status': 'error', 'message': f"{layer_name} n'est pas une couche cartographique."}), 400
 
-            gdf = gpd.read_postgis(f'SELECT * FROM "{layer_name}"', con=conn, geom_col='geometry')
+            q_layer = _quote_ident(layer_name)
+            gdf = gpd.read_postgis(f'SELECT * FROM "resilience".{q_layer}', con=conn, geom_col='geometry')
             gdf = gdf.to_crs(epsg=4326)
         
-        # 🔧 Nettoyer les NaN
+        # Nettoyage des attributs uniquement (ne jamais convertir geometry en string).
         gdf_clean = gdf.copy()
-        gdf_clean = gdf_clean.replace({pd.NA: None})
-        gdf_clean = gdf_clean.fillna('')  
+        attr_df = gdf_clean.drop(columns='geometry').replace({pd.NA: None})
+        attr_df = attr_df.where(pd.notna(attr_df), None)
+        table_data = attr_df.fillna('').to_dict(orient='records')
+        gdf_clean[attr_df.columns] = attr_df
         geojson = gdf_clean.__geo_interface__
-        table_data = gdf_clean.drop(columns='geometry').to_dict(orient='records')
 
         return jsonify({
             'status': 'ok',
@@ -5328,7 +5412,14 @@ def get_resilience_layers_support():
             FROM information_schema.tables
             WHERE table_schema = 'resilience'
               AND table_type IN ('BASE TABLE', 'VIEW')
-              AND table_name LIKE 'alea%';
+              AND table_name LIKE 'alea%'
+              AND EXISTS (
+                  SELECT 1
+                  FROM information_schema.columns c
+                  WHERE c.table_schema = 'resilience'
+                    AND c.table_name = information_schema.tables.table_name
+                    AND c.column_name = 'geometry'
+              );
         """))
         alea_tables = [row[0] for row in result]
     return jsonify(sorted(alea_tables))
@@ -5338,11 +5429,11 @@ def get_resilience_layers_support():
 @app.route('/resilience_dependencies/<layer>')
 def resilience_dependencies(layer):
     with engine.begin() as conn:
-        result = conn.execute(text(f"""
+        result = conn.execute(text("""
             SELECT matviewname FROM pg_matviews
             WHERE schemaname = 'resilience'
-              AND definition ILIKE '%{layer}%';
-        """))
+              AND definition ILIKE :pattern;
+        """), {"pattern": f"%{layer}%"})
         deps = [row[0] for row in result]
     return jsonify({"dependencies": deps})
 
@@ -5351,24 +5442,22 @@ def resilience_dependencies(layer):
 @app.route('/delete_resilience_layer', methods=['POST'])
 def delete_resilience_layer():
     data = request.json
-    layer = data.get('layer')
+    layer = (data or {}).get('layer')
+    if not layer:
+        return jsonify({"status": "error", "message": "Couche manquante."}), 400
 
     try:
         with engine.begin() as conn:
-            conn.execute(text(f'''
-                DO $$
-                BEGIN
-                    IF EXISTS (
-                        SELECT FROM pg_matviews 
-                        WHERE matviewname = '{layer}' AND schemaname = 'resilience'
-                    ) THEN
-                        EXECUTE 'DROP MATERIALIZED VIEW resilience."{layer}" CASCADE';
-                    ELSE
-                        EXECUTE 'DROP TABLE IF EXISTS resilience."{layer}" CASCADE';
-                    END IF;
-                END;
-                $$;
-            '''))
+            is_matview = conn.execute(text("""
+                SELECT 1
+                FROM pg_matviews
+                WHERE schemaname = 'resilience' AND matviewname = :layer
+            """), {"layer": layer}).first() is not None
+            q_layer = _quote_ident(layer)
+            if is_matview:
+                conn.execute(text(f'DROP MATERIALIZED VIEW IF EXISTS "resilience".{q_layer} CASCADE'))
+            else:
+                conn.execute(text(f'DROP TABLE IF EXISTS "resilience".{q_layer} CASCADE'))
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
@@ -5381,7 +5470,8 @@ def download_resilience_layer(layer):
     try:
         if not _object_exists('resilience', layer):
             return jsonify({'status': 'error', 'message': f'Couche {layer} introuvable.'}), 404
-        gdf = gpd.read_postgis(f'SELECT * FROM resilience."{layer}"', con=engine, geom_col='geometry')
+        q_layer = _quote_ident(layer)
+        gdf = gpd.read_postgis(f'SELECT * FROM "resilience".{q_layer}', con=engine, geom_col='geometry')
         gdf = gdf.to_crs(epsg=4326)
         df = gdf.drop(columns='geometry')
 
@@ -5476,28 +5566,30 @@ def _read_gpkg_safe(path: str) -> gpd.GeoDataFrame:
         if not layers:
             raise exc
         last_err = exc
-        any_geom = False
-        accepted = {"POLYGON", "MULTIPOLYGON", "LINESTRING", "MULTILINESTRING", "POINT", "MULTIPOINT"}
+        accepted = {"Polygon", "MultiPolygon", "LineString", "MultiLineString", "Point", "MultiPoint"}
 
-        def _flatten_geom(g):
-            from shapely.geometry import GeometryCollection
+        def _geom_rank(g):
+            gtype = g.geom_type
+            if "Polygon" in gtype:
+                return (3, float(getattr(g, "area", 0.0) or 0.0))
+            if "LineString" in gtype:
+                return (2, float(getattr(g, "length", 0.0) or 0.0))
+            if "Point" in gtype:
+                return (1, 0.0)
+            return (0, 0.0)
+
+        def _pick_single_geom(g):
             if g is None or g.is_empty:
-                return []
-            if g.geom_type in {"Polygon", "MultiPolygon", "LineString", "MultiLineString", "Point", "MultiPoint"}:
-                return [g]
-            if isinstance(g, GeometryCollection):
-                out = []
-                for sub in g.geoms:
-                    out.extend(_flatten_geom(sub))
-                return out
-            # autres types: tenter make_valid puis flatten
-            try:
-                g2 = make_valid(g)
-                if g2 is not None and not g2.is_empty and g2.geom_type != g.geom_type:
-                    return _flatten_geom(g2)
-            except Exception:
-                pass
-            return []
+                return None
+            if g.geom_type in accepted:
+                return g
+            if g.geom_type == "GeometryCollection":
+                candidates = [sub for sub in getattr(g, "geoms", []) if sub is not None and not sub.is_empty]
+                candidates = [sub for sub in candidates if sub.geom_type in accepted]
+                if not candidates:
+                    return None
+                return max(candidates, key=_geom_rank)
+            return None
 
         for layer in layers:
             try:
@@ -5507,74 +5599,75 @@ def _read_gpkg_safe(path: str) -> gpd.GeoDataFrame:
                 with fiona.open(path, layer=layer) as src:
                     crs_val = src.crs_wkt or src.crs
                     for feat in src:
+                        props_base = feat.get("properties") or {}
                         geom = feat.get("geometry")
                         if not geom:
+                            geoms.append(None)
+                            props.append(dict(props_base))
                             continue
-                        gtype = (geom.get("type") or "").upper()
+                        gi = geom.__geo_interface__ if hasattr(geom, "__geo_interface__") else geom
+                        gtype = (gi.get("type") or "").upper() if isinstance(gi, dict) else ""
+                        coords = gi.get("coordinates") if isinstance(gi, dict) else None
                         try:
-                            parts: list = []
-
-                            # MultiPolygon casse parfois shapely.shape() avec ce GPKG.
+                            g = None
                             if gtype == "MULTIPOLYGON":
-                                for poly in geom.get("coordinates", []):
-                                    try:
-                                        exterior = poly[0]
-                                        holes = poly[1:] if len(poly) > 1 else []
-                                        p = Polygon(exterior, holes)
-                                        if not p.is_empty:
-                                            parts.append(make_valid(p))
-                                    except Exception as sub_e:
-                                        last_err = sub_e
+                                polys = []
+                                for poly_coords in (coords or []):
+                                    if not poly_coords:
                                         continue
+                                    exterior = poly_coords[0] if len(poly_coords) > 0 else []
+                                    holes = poly_coords[1:] if len(poly_coords) > 1 else []
+                                    p = Polygon(exterior, holes)
+                                    if p is not None and not p.is_empty:
+                                        polys.append(p)
+                                if not polys:
+                                    geoms.append(None)
+                                    props.append(dict(props_base))
+                                    continue
+                                g = polys[0] if len(polys) == 1 else MultiPolygon(polys)
                             elif gtype == "MULTILINESTRING":
-                                for line in geom.get("coordinates", []):
-                                    try:
-                                        ln = LineString(line)
-                                        if not ln.is_empty:
-                                            parts.append(make_valid(ln))
-                                    except Exception as sub_e:
-                                        last_err = sub_e
+                                lines = []
+                                for line_coords in (coords or []):
+                                    if not line_coords:
                                         continue
+                                    ln = LineString(line_coords)
+                                    if ln is not None and not ln.is_empty:
+                                        lines.append(ln)
+                                if not lines:
+                                    geoms.append(None)
+                                    props.append(dict(props_base))
+                                    continue
+                                g = lines[0] if len(lines) == 1 else MultiLineString(lines)
                             elif gtype == "MULTIPOINT":
-                                for pt in geom.get("coordinates", []):
-                                    try:
-                                        p = Point(pt)
-                                        if not p.is_empty:
-                                            parts.append(p)
-                                    except Exception as sub_e:
-                                        last_err = sub_e
-                                        continue
+                                pts = []
+                                for pt_coords in (coords or []):
+                                    p = Point(pt_coords)
+                                    if p is not None and not p.is_empty:
+                                        pts.append(p)
+                                if not pts:
+                                    geoms.append(None)
+                                    props.append(dict(props_base))
+                                    continue
+                                g = pts[0] if len(pts) == 1 else MultiPoint(pts)
                             else:
-                                g = shape(geom)
-                                try:
-                                    g = make_valid(g)
-                                except Exception:
-                                    pass
-                                parts = [g]
+                                g = shape(gi)
 
-                            # uniformiser et filtrer sur les géométries simples acceptées
-                            final_parts = []
-                            for part in parts:
-                                for sub in _flatten_geom(part):
-                                    if sub.geom_type.upper() in accepted and not sub.is_empty:
-                                        final_parts.append(sub)
+                            g = _repair_geometry_preserve_family(g)
 
-                            if not final_parts:
-                                continue
-                            props_base = feat.get("properties") or {}
-                            for sub in final_parts:
-                                geoms.append(sub)
-                                props.append(dict(props_base))
-                                any_geom = True
+                            final_geom = _pick_single_geom(g)
+                            geoms.append(final_geom)
+                            props.append(dict(props_base))
                         except Exception as e:
                             last_err = e
+                            geoms.append(None)
+                            props.append(dict(props_base))
                             continue
-                if geoms:
+                if props:
                     return gpd.GeoDataFrame(props, geometry=gpd.GeoSeries(geoms, crs=crs_val))
             except Exception as e:
                 last_err = e
                 continue
-        if any_geom:
+        if last_err is not None:
             raise last_err
         raise ValueError("GPKG sans géométrie valide (types supportés: POINT/LINESTRING/POLYGON).")
 
@@ -5596,8 +5689,17 @@ def _pick_alea_value_col(conn, table):
 
 def _pick_pk_column(conn, schema: str, table: str) -> str | None:
     """
-    Retourne le premier champ de clé primaire si présent, sinon None.
+    Retourne une clé stable pour les jointures, sans heuristique sur des noms de colonnes:
+    1) clé primaire déclarée
+    2) contrainte / index UNIQUE mono-colonne
+    3) fallback data-driven: colonne non géométrique unique et non nulle
+       (candidats ordonnés via pg_stats, puis vérification exacte)
+    Résultat mis en cache par table pour éviter des scans répétés.
     """
+    cache_key = (schema, table)
+    if cache_key in _KEY_COLUMN_CACHE:
+        return _KEY_COLUMN_CACHE[cache_key]
+
     pk_q = text("""
         SELECT a.attname
         FROM pg_constraint c
@@ -5609,7 +5711,255 @@ def _pick_pk_column(conn, schema: str, table: str) -> str | None:
         LIMIT 1
     """)
     row = conn.execute(pk_q, {"schema": schema, "table": table}).first()
-    return row[0] if row else None
+    if row:
+        _KEY_COLUMN_CACHE[cache_key] = row[0]
+        return row[0]
+
+    uq_q = text("""
+        SELECT a.attname
+        FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+        WHERE c.contype = 'u'
+          AND n.nspname = :schema
+          AND t.relname = :table
+          AND array_length(c.conkey, 1) = 1
+        ORDER BY a.attnum
+        LIMIT 1
+    """)
+    row = conn.execute(uq_q, {"schema": schema, "table": table}).first()
+    if row:
+        candidate = row[0]
+        if candidate and candidate != "geometry":
+            _KEY_COLUMN_CACHE[cache_key] = candidate
+            return candidate
+
+    idx_uq_q = text("""
+        SELECT a.attname
+        FROM pg_index i
+        JOIN pg_class t ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = i.indkey[0]
+        WHERE n.nspname = :schema
+          AND t.relname = :table
+          AND i.indisunique = true
+          AND array_length(i.indkey, 1) = 1
+        LIMIT 1
+    """)
+    row = conn.execute(idx_uq_q, {"schema": schema, "table": table}).first()
+    if row:
+        candidate = row[0]
+        if candidate and candidate != "geometry":
+            _KEY_COLUMN_CACHE[cache_key] = candidate
+            return candidate
+
+    candidates_q = text("""
+        SELECT a.attname
+        FROM pg_attribute a
+        JOIN pg_class t ON t.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        LEFT JOIN pg_stats s
+          ON s.schemaname = n.nspname
+         AND s.tablename = t.relname
+         AND s.attname = a.attname
+        WHERE n.nspname = :schema
+          AND t.relname = :table
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND a.attname <> 'geometry'
+        ORDER BY
+          CASE WHEN s.n_distinct = -1 THEN 0 ELSE 1 END,
+          COALESCE(s.null_frac, 1),
+          a.attnum
+        LIMIT 12
+    """)
+    candidates = [r[0] for r in conn.execute(candidates_q, {"schema": schema, "table": table})]
+    q_table = _qualified_ident(schema, table)
+    for col in candidates:
+        q_col = _quote_ident(col)
+        uniq_sql = text(f"""
+            SELECT
+                COUNT(*)::bigint AS total_rows,
+                COUNT({q_col})::bigint AS non_null_rows,
+                COUNT(DISTINCT {q_col})::bigint AS distinct_rows
+            FROM {q_table}
+        """)
+        stats = conn.execute(uniq_sql).mappings().first()
+        if not stats:
+            continue
+        total_rows = int(stats["total_rows"] or 0)
+        non_null_rows = int(stats["non_null_rows"] or 0)
+        distinct_rows = int(stats["distinct_rows"] or 0)
+        if total_rows > 0 and non_null_rows == total_rows and distinct_rows == total_rows:
+            _KEY_COLUMN_CACHE[cache_key] = col
+            return col
+
+    _KEY_COLUMN_CACHE[cache_key] = None
+    return None
+
+
+def _ensure_resilience_run_history_table():
+    """
+    Crée la table d'historique des runs résilience si elle n'existe pas.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS resilience.run_history (
+                run_id BIGSERIAL PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                main_layer TEXT NOT NULL,
+                view_name TEXT NOT NULL,
+                stress_layers TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_seconds DOUBLE PRECISION,
+                message TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS run_history_created_at_idx
+            ON resilience.run_history (created_at DESC)
+        """))
+
+
+def _log_resilience_run(main_layer, view_name, stress_layers, status, duration_seconds=None, message=None):
+    """
+    Enregistre un run résilience (succès/erreur) dans l'historique.
+    """
+    try:
+        _ensure_resilience_run_history_table()
+        stress_list = [str(s).strip() for s in (stress_layers or []) if str(s).strip()]
+        stress_text = json.dumps(stress_list, ensure_ascii=False)
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO resilience.run_history
+                (main_layer, view_name, stress_layers, status, duration_seconds, message)
+                VALUES (:main_layer, :view_name, :stress_layers, :status, :duration_seconds, :message)
+            """), {
+                "main_layer": main_layer or "",
+                "view_name": view_name or "",
+                "stress_layers": stress_text,
+                "status": status or "unknown",
+                "duration_seconds": duration_seconds,
+                "message": message or ""
+            })
+    except Exception:
+        logging.exception("Impossible d'enregistrer l'historique du run résilience.")
+
+
+@app.route('/resilience_runs_history')
+def resilience_runs_history():
+    """
+    Retourne l'historique des runs de résilience, avec filtre texte optionnel.
+    """
+    q = (request.args.get("q") or "").strip()
+    limit_raw = request.args.get("limit", "200")
+    try:
+        limit = int(limit_raw)
+    except ValueError:
+        limit = 200
+    limit = max(1, min(limit, 500))
+
+    _ensure_resilience_run_history_table()
+    like = f"%{q}%"
+
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT run_id, created_at, main_layer, view_name, stress_layers, status, duration_seconds, message
+            FROM resilience.run_history
+            WHERE (:q = ''
+               OR run_id::text ILIKE :like
+               OR main_layer ILIKE :like
+               OR view_name ILIKE :like
+               OR stress_layers ILIKE :like
+               OR status ILIKE :like)
+            ORDER BY run_id DESC
+            LIMIT :limit
+        """), {"q": q, "like": like, "limit": limit}).mappings().all()
+
+    payload = []
+    for row in rows:
+        stress_raw = (row["stress_layers"] or "").strip()
+        stress_layers = []
+        if stress_raw:
+            if stress_raw.startswith("["):
+                try:
+                    parsed = json.loads(stress_raw)
+                    if isinstance(parsed, list):
+                        stress_layers = [str(s).strip() for s in parsed if str(s).strip()]
+                except Exception:
+                    stress_layers = []
+            if not stress_layers:
+                stress_layers = [s.strip() for s in stress_raw.split(",") if s.strip()]
+        payload.append({
+            "run_id": row["run_id"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "main_layer": row["main_layer"],
+            "view_name": row["view_name"],
+            "stress_layers": stress_layers,
+            "status": row["status"],
+            "duration_seconds": row["duration_seconds"],
+            "message": row["message"] or ""
+        })
+    return jsonify(payload)
+
+
+@app.route('/resilience_runs_delete', methods=['POST'])
+def resilience_runs_delete():
+    """
+    Supprime une sélection de runs (par run_id).
+    """
+    _ensure_resilience_run_history_table()
+    data = request.get_json(silent=True) or {}
+    raw_ids = data.get("run_ids")
+    if not isinstance(raw_ids, list):
+        return jsonify({"status": "error", "message": "run_ids doit être une liste."}), 400
+
+    run_ids = []
+    for raw in raw_ids:
+        try:
+            rid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if rid > 0:
+            run_ids.append(rid)
+    run_ids = sorted(set(run_ids))
+
+    if not run_ids:
+        return jsonify({"status": "error", "message": "Aucun run_id valide fourni."}), 400
+
+    placeholders = ", ".join(f":id_{idx}" for idx in range(len(run_ids)))
+    params = {f"id_{idx}": rid for idx, rid in enumerate(run_ids)}
+
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(f"DELETE FROM resilience.run_history WHERE run_id IN ({placeholders})"),
+                params,
+            )
+        return jsonify({
+            "status": "ok",
+            "requested_count": len(run_ids),
+            "deleted_count": int(result.rowcount or 0),
+        })
+    except Exception as e:
+        logging.exception("Suppression des runs de résilience impossible.")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/resilience_runs_reset', methods=['POST'])
+def resilience_runs_reset():
+    """
+    Réinitialise entièrement l'historique des runs.
+    """
+    _ensure_resilience_run_history_table()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("TRUNCATE TABLE resilience.run_history RESTART IDENTITY"))
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logging.exception("Réinitialisation de l'historique des runs impossible.")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # --- SSE : création vue matérialisée aléas avec logs en temps réel ---
@@ -5626,85 +5976,109 @@ def alea_view_batch_stream():
         return jsonify({'status': 'error', 'message': 'Nom de vue invalide (lettres, chiffres, underscore).'}), 400
 
     def gen():
+        run_started = time.time()
         try:
             all_alea = _list_alea_tables()
             if not all_alea:
+                _log_resilience_run(main, view_name, [], "error", message="Aucune couche aléa trouvée.")
                 yield f"data: {json.dumps({'status':'error','message':'Aucune couche aléa trouvée.'})}\n\n"
                 return
             alea_tables = selected_alea if selected_alea else all_alea
             missing = [a for a in alea_tables if a not in all_alea]
             if missing:
+                _log_resilience_run(main, view_name, alea_tables, "error", message='Couches aléa introuvables: ' + ', '.join(missing))
                 yield f"data: {json.dumps({'status':'error','message':'Couches aléa introuvables: ' + ', '.join(missing)})}\n\n"
                 return
 
             temp_table = f"{view_name}__work"
 
             with engine.begin() as conn:
+                # Pas de limite SQL pour les couches volumineuses.
+                conn.execute(text("SET LOCAL statement_timeout = 0"))
                 exists = conn.execute(text("""
                     SELECT 1 FROM information_schema.tables
                     WHERE table_schema='resilience' AND table_name=:t
                 """), {"t": main}).first()
                 if not exists:
+                    _log_resilience_run(main, view_name, alea_tables, "error", message=f'Couche principale {main} introuvable.')
                     yield f"data: {json.dumps({'status':'error','message':f'Couche principale {main} introuvable.'})}\n\n"
                     return
 
                 pk_col = _pick_pk_column(conn, 'resilience', main)
-                key_col = f'"{pk_col}"' if pk_col else '__rowid'
+                key_col = _quote_ident(pk_col) if pk_col else _quote_ident('__rowid')
+                q_temp_table = _quote_ident(temp_table)
+                q_main = _quote_ident(main)
+                q_view = _quote_ident(view_name)
 
                 if pk_col:
                     conn.execute(text(f'''
-                        DROP TABLE IF EXISTS "resilience"."{temp_table}";
-                        CREATE TABLE "resilience"."{temp_table}" AS
-                        SELECT * FROM "resilience"."{main}";
+                        DROP TABLE IF EXISTS "resilience".{q_temp_table};
+                        CREATE TABLE "resilience".{q_temp_table} AS
+                        SELECT * FROM "resilience".{q_main};
                     '''))
                 else:
                     conn.execute(text(f'''
-                        DROP TABLE IF EXISTS "resilience"."{temp_table}";
-                        CREATE TABLE "resilience"."{temp_table}" AS
+                        DROP TABLE IF EXISTS "resilience".{q_temp_table};
+                        CREATE TABLE "resilience".{q_temp_table} AS
                         SELECT *, row_number() OVER () AS __rowid
-                        FROM "resilience"."{main}";
+                        FROM "resilience".{q_main};
                     '''))
 
                 conn.execute(text(f'''
-                    CREATE INDEX IF NOT EXISTS "{temp_table}_geom_idx"
-                    ON "resilience"."{temp_table}" USING GIST(geometry)
+                    CREATE INDEX IF NOT EXISTS {_quote_ident(f"{temp_table}_geom_idx")}
+                    ON "resilience".{q_temp_table} USING GIST(geometry)
                 '''))
                 if pk_col:
                     conn.execute(text(f'''
-                        CREATE INDEX IF NOT EXISTS "{temp_table}_{pk_col}_idx"
-                        ON "resilience"."{temp_table}" ({key_col})
+                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{temp_table}_{pk_col}_idx")}
+                        ON "resilience".{q_temp_table} ({key_col})
                     '''))
                 else:
                     conn.execute(text(f'''
-                        CREATE INDEX IF NOT EXISTS "{temp_table}__rowid_idx"
-                        ON "resilience"."{temp_table}" (__rowid)
+                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{temp_table}__rowid_idx")}
+                        ON "resilience".{q_temp_table} (__rowid)
                     '''))
 
                 total = len(alea_tables)
                 for idx, alea in enumerate(alea_tables, 1):
                     start = time.time()
                     val_col = _pick_alea_value_col(conn, alea)
+                    q_alea = _quote_ident(alea)
+                    q_val_col = _quote_ident(val_col)
                     conn.execute(text(f'''
-                        ALTER TABLE "resilience"."{temp_table}"
-                        ADD COLUMN IF NOT EXISTS "{alea}" text
+                        ALTER TABLE "resilience".{q_temp_table}
+                        ADD COLUMN IF NOT EXISTS {q_alea} text
                     '''))
                     conn.execute(text(f'''
-                        CREATE INDEX IF NOT EXISTS "{alea}_geom_idx"
-                        ON "resilience"."{alea}" USING GIST(geometry)
+                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{alea}_geom_idx")}
+                        ON "resilience".{q_alea} USING GIST(geometry)
                     '''))
                     conn.execute(text(f'''
-                        WITH agg AS (
-                            SELECT v.{key_col},
-                                   string_agg(DISTINCT a."{val_col}"::text, ',') AS val
-                        FROM "resilience"."{temp_table}" v
-                        JOIN "resilience"."{alea}" a
-                          ON ST_Intersects(a.geometry, v.geometry)
-                        GROUP BY v.{key_col}
-                    )
-                    UPDATE "resilience"."{temp_table}" v
-                    SET "{alea}" = agg.val
-                    FROM agg
-                    WHERE v.{key_col} = agg.{key_col};
+                        WITH intersects AS (
+                            SELECT
+                                v.{key_col} AS k,
+                                btrim(a.{q_val_col}::text) AS raw_val
+                            FROM "resilience".{q_temp_table} v
+                            JOIN "resilience".{q_alea} a
+                              ON ST_Intersects(a.geometry, v.geometry)
+                            WHERE a.{q_val_col} IS NOT NULL
+                        ),
+                        agg AS (
+                            SELECT
+                                k,
+                                CASE
+                                    WHEN bool_and(raw_val ~ '^-?[0-9]+$')
+                                        THEN MAX(CASE WHEN raw_val ~ '^-?[0-9]+$' THEN raw_val::numeric END)::text
+                                    ELSE string_agg(DISTINCT raw_val, ',')
+                                END AS val
+                            FROM intersects
+                            WHERE raw_val <> ''
+                            GROUP BY k
+                        )
+                        UPDATE "resilience".{q_temp_table} v
+                        SET {q_alea} = agg.val
+                        FROM agg
+                        WHERE v.{key_col} = agg.k;
                     '''))
                     elapsed = round(time.time() - start, 2)
                     payload = {'status': 'progress', 'layer': alea, 'seconds': elapsed, 'step': idx, 'total': total}
@@ -5712,25 +6086,30 @@ def alea_view_batch_stream():
 
                 # Table finale (pas de MV) + indexes
                 conn.execute(text(f'''
-                    DROP TABLE IF EXISTS "resilience"."{view_name}" CASCADE;
-                    CREATE TABLE "resilience"."{view_name}" AS
-                    SELECT * FROM "resilience"."{temp_table}";
+                    DROP TABLE IF EXISTS "resilience".{q_view} CASCADE;
+                    CREATE TABLE "resilience".{q_view} AS
+                    SELECT * FROM "resilience".{q_temp_table};
                 '''))
                 conn.execute(text(f'''
-                    CREATE INDEX IF NOT EXISTS "{view_name}_geom_idx"
-                    ON "resilience"."{view_name}" USING GIST(geometry)
+                    CREATE INDEX IF NOT EXISTS {_quote_ident(f"{view_name}_geom_idx")}
+                    ON "resilience".{q_view} USING GIST(geometry)
                 '''))
                 if pk_col:
                     conn.execute(text(f'''
-                        CREATE INDEX IF NOT EXISTS "{view_name}_{pk_col}_idx"
-                        ON "resilience"."{view_name}" ({key_col})
+                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{view_name}_{pk_col}_idx")}
+                        ON "resilience".{q_view} ({key_col})
                     '''))
                 else:
                     conn.execute(text(f'''
-                        CREATE INDEX IF NOT EXISTS "{view_name}__rowid_idx"
-                        ON "resilience"."{view_name}" (__rowid)
+                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{view_name}__rowid_idx")}
+                        ON "resilience".{q_view} (__rowid)
                     '''))
-                conn.execute(text(f'''DROP TABLE IF EXISTS "resilience"."{temp_table}" CASCADE;'''))
+                    # Ne pas exposer la colonne technique dans la sortie finale.
+                    conn.execute(text(f'''
+                        ALTER TABLE "resilience".{q_view}
+                        DROP COLUMN IF EXISTS "__rowid"
+                    '''))
+                conn.execute(text(f'''DROP TABLE IF EXISTS "resilience".{q_temp_table} CASCADE;'''))
 
             done = {
                 'status': 'done',
@@ -5740,8 +6119,10 @@ def alea_view_batch_stream():
                 'download_gpkg': f'/download_resilience_layer/{view_name}?format=gpkg',
                 'download_shp': f'/download_resilience_layer/{view_name}?format=shp'
             }
+            _log_resilience_run(main, view_name, alea_tables, "done", round(time.time() - run_started, 2))
             yield f"data: {json.dumps(done)}\n\n"
         except Exception as e:
+            _log_resilience_run(main, view_name, selected_alea, "error", round(time.time() - run_started, 2), str(e))
             yield f"data: {json.dumps({'status':'error','message':str(e)})}\n\n"
 
     return Response(stream_with_context(gen()), mimetype='text/event-stream')

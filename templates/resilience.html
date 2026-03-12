@@ -1,131 +1,389 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="fr" class="dark">
 <head>
     <meta charset="UTF-8">
-    <title>Résilience Réseau</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    
-    <!-- Feuilles de style -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <title>SippeRésiste - Plateforme d'Analyse</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: { brand: { 400: '#22d3ee', 500: '#06b6d4', 600: '#0891b2' } }
+                }
+            }
+        }
+    </script>
     <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-
-    <!-- Librairie Leaflet -->
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <style>
+        .hidden-element { display: none !important; }
+        .progress-bar { transition: width 0.5s ease-in-out; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        #resilience-map { min-height: 520px; border-radius: 12px; border: 1px solid #1e293b; }
+        #file-names-container > div { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 10px; }
+        #file-names-container input[type="text"] { width: 100%; background: #020617; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 8px 10px; margin-top: 8px; }
+        #import-feedback { border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 600; border: 1px solid transparent; }
+        #import-feedback.success { color: #6ee7b7; background: rgba(6, 78, 59, 0.35); border-color: rgba(16, 185, 129, 0.45); }
+        #import-feedback.error { color: #fca5a5; background: rgba(127, 29, 29, 0.35); border-color: rgba(239, 68, 68, 0.45); }
+        .alea-support-card { 
+            background: linear-gradient(135deg, rgba(15, 23, 42, 0.8) 0%, rgba(2, 6, 23, 0.9) 100%); 
+            border: 1px solid #1e293b;
+            box-shadow: 0 4px 20px rgba(6, 182, 212, 0.08);
+        }
+        .alea-support-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+        .alea-support-meta h3 { background: linear-gradient(135deg, #22d3ee 0%, #06b6d4 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+        #alea-support-count { 
+            display: inline-flex; 
+            align-items: center; 
+            justify-content: center; 
+            padding: 6px 14px; 
+            border-radius: 999px; 
+            font-size: 0.75rem; 
+            font-weight: 700; 
+            color: #ecf0f1;
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.2) 0%, rgba(6, 182, 212, 0.15) 100%);
+            border: 1px solid rgba(34, 211, 238, 0.5);
+            box-shadow: 0 2px 8px rgba(34, 211, 238, 0.15);
+            white-space: nowrap; 
+        }
+        #alea-support-list { 
+            min-height: 170px; 
+            max-height: 310px; 
+            overflow-y: auto; 
+            overflow-x: hidden; 
+            padding: 10px; 
+            display: flex; 
+            flex-direction: column; 
+            gap: 10px; 
+            background: linear-gradient(180deg, #020617 0%, #0b1220 100%);
+            border: 1px solid #334155; 
+            border-radius: 12px;
+            box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        #alea-support-list .alea-chip { 
+            width: 100%; 
+            overflow-wrap: anywhere; 
+            word-break: break-word; 
+            color: #e2e8f0; 
+            background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.7) 100%);
+            border: 1px solid rgba(34, 211, 238, 0.3);
+            border-left: 4px solid #22d3ee;
+            border-radius: 10px; 
+            padding: 12px 14px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            gap: 12px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 2px 8px rgba(34, 211, 238, 0.08);
+            position: relative;
+            overflow: hidden;
+        }
+        #alea-support-list .alea-chip::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent 0%, rgba(34, 211, 238, 0.1) 50%, transparent 100%);
+            transition: left 0.5s ease;
+        }
+        #alea-support-list .alea-chip:hover {
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.15) 0%, rgba(6, 182, 212, 0.1) 100%);
+            border-color: rgba(34, 211, 238, 0.6);
+            box-shadow: 0 4px 16px rgba(34, 211, 238, 0.15);
+            transform: translateX(4px);
+        }
+        #alea-support-list .alea-chip:hover::before {
+            left: 100%;
+        }
+        #alea-support-list .chip-title { 
+            font-weight: 700; 
+            font-size: 0.9rem; 
+            line-height: 1.4;
+        }
+        #alea-support-list .chip-link { 
+            flex-shrink: 0; 
+            text-decoration: none; 
+            color: #ecf0f1;
+            border: 1px solid rgba(34, 211, 238, 0.6);
+            background: linear-gradient(135deg, rgba(6, 182, 212, 0.3) 0%, rgba(8, 47, 73, 0.5) 100%);
+            border-radius: 6px; 
+            padding: 6px 12px; 
+            font-size: 0.73rem; 
+            font-weight: 600;
+            transition: all 0.25s ease;
+            box-shadow: 0 2px 6px rgba(34, 211, 238, 0.1);
+            cursor: pointer;
+        }
+        #alea-support-list .chip-link:hover { 
+            background: linear-gradient(135deg, #22d3ee 0%, #06b6d4 100%);
+            color: #000;
+            box-shadow: 0 4px 12px rgba(34, 211, 238, 0.3);
+            transform: scale(1.05);
+        }
+        #alea-support-list .chip-link:active {
+            transform: scale(0.98);
+        }
+        #alea-support-list em { 
+            width: 100%; 
+            color: #94a3b8; 
+            font-style: normal; 
+            font-weight: 600; 
+            text-align: center; 
+            padding: 20px 8px;
+            font-size: 0.85rem;
+        }
+        #layer-controls { max-height: 260px; overflow-y: auto; padding-right: 4px; }
+        #layer-controls > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; min-width: 0; }
+        #layer-controls label { min-width: 0; flex: 1 1 220px; overflow-wrap: anywhere; word-break: break-word; }
+        #layer-controls label strong { overflow-wrap: anywhere; word-break: break-word; }
+        #layer-controls .download-format, #layer-controls .delete-layer-btn, #layer-controls .layer-color { background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; padding: 6px 8px; }
+        #layer-controls .delete-layer-btn { border-color: #7f1d1d; color: #fecaca; background: rgba(127, 29, 29, 0.2); }
+        #layer-controls .delete-layer-btn:hover { background: rgba(127, 29, 29, 0.4); }
+        #alea-support-list::-webkit-scrollbar { width: 9px; }
+        #alea-support-list::-webkit-scrollbar-track { background: #0f172a; border-radius: 8px; }
+        #alea-support-list::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; border: 2px solid #0f172a; }
+        #alea-support-list::-webkit-scrollbar-thumb:hover { background: #475569; }
+        .alea-select-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
+        #alea-selected-count { display: inline-flex; align-items: center; border: 1px solid #1f4b5f; background: rgba(8, 47, 73, 0.42); color: #67e8f9; border-radius: 999px; font-size: 0.72rem; font-weight: 700; padding: 3px 10px; white-space: nowrap; }
+        #alea-selection-helper { font-size: 0.75rem; color: #94a3b8; line-height: 1.35; }
+        #layer-alea.is-disabled { opacity: 0.5; filter: saturate(0.4); cursor: not-allowed; }
+        #alea-clear-btn { margin-top: 8px; border: 1px solid #334155; color: #cbd5e1; background: rgba(15, 23, 42, 0.82); border-radius: 8px; padding: 6px 10px; font-size: 0.74rem; font-weight: 600; }
+        #alea-clear-btn:hover { background: rgba(30, 41, 59, 0.95); border-color: #475569; }
+        @media (max-width: 1100px) { .alea-support-meta { flex-direction: column; align-items: flex-start; } }
+        #table-container { max-height: 62vh; overflow: auto; border: 1px solid #334155; border-radius: 10px; background: #020617; }
+        #table-container table { width: max-content; min-width: 100%; border-collapse: collapse; }
+        #table-container th, #table-container td { border: 1px solid #334155; padding: 8px 10px; text-align: left; color: #d1d5db; white-space: nowrap; }
+        #table-container thead { background: #0b1220; }
+        #table-container thead th { position: sticky; top: 0; z-index: 3; background: #0b1220; }
+        #table-container tbody tr:nth-child(even) { background: #0f172a; }
+        #table-container tbody tr:hover { background: rgba(6, 182, 212, 0.12); }
+    </style>
 </head>
-<body>
+<body class="bg-slate-950 font-sans text-slate-300 min-h-screen flex flex-col overflow-x-hidden">
 
-<!-- Bandeau -->
-<header>
-    <div class="logo-container">
-        <img src="/image/logo.png" alt="Logo SIPPEREC">
-    </div>
-    <h1>Résilience Réseau</h1>
-    <div class="logout-container">
-        <a href="{{ url_for('interface') }}" class="btn-logout">Retour Interface</a>
-    </div>
-</header>
-
-<main>
-    <div class="container">
-
-        <!-- Section Import -->
-
-        <section class="section">
-            <h2>Importer des Données de Résilience</h2>
-            <form id="resilience-form" enctype="multipart/form-data">
-                <div class="file-input-container">
-                    <label for="resilience-files">Fichiers GPKG ou Shapefile :</label>
-                    <input type="file" id="resilience-files" name="files" multiple accept=".gpkg,.shp,.shx,.dbf,.prj,.cpg,.sbn,.sbx">
+    <div id="app-container" class="flex-1 flex flex-col h-screen">
+        <nav class="bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center shrink-0">
+            <div class="flex items-center gap-4">
+                <div class="w-24 h-14 rounded-[999px] bg-white/95 px-2 py-1 shadow-md ring-1 ring-slate-600 flex items-center justify-center">
+                    <img src="/image/logo.png" alt="Logo SIPPEREC" class="h-12 w-auto object-contain">
                 </div>
+                <div class="font-bold text-xl tracking-wider text-brand-400 border-l border-slate-700 pl-4">SippeRésiste</div>
+            </div>
+            <div class="flex gap-6 text-sm font-medium">
+                <button onclick="switchTab('config')" id="nav-config" class="pb-1 border-b-2 border-brand-400 text-brand-400">Configuration</button>
+                <button onclick="switchTab('analyse')" id="nav-analyse" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Analyse Réseau</button>
+                <button onclick="switchTab('historique')" id="nav-historique" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Historique runs</button>
+                <button onclick="switchTab('users')" id="nav-users" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Admin. & Accès</button>
+                <button onclick="switchTab('aide')" id="nav-aide" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Aide & Doc</button>
+            </div>
+            <a href="{{ url_for('logout') }}" class="text-sm text-slate-500 hover:text-red-400 flex items-center gap-2">
+                <span>Déconnexion</span> 🚪
+            </a>
+        </nav>
 
-                <div id="file-names-container" class="file-list"></div>
+        <main class="flex-1 p-6 overflow-hidden flex flex-col">
+            <div id="page-config" class="h-full flex gap-6">
+                <div class="w-1/3 bg-slate-900 rounded-lg border border-slate-800 flex flex-col shadow-lg overflow-hidden">
+                    <div class="p-6 overflow-y-auto h-full space-y-6">
+                        <section>
+                            <h2 class="text-xl font-semibold mb-3 text-slate-100">Import de couches</h2>
+                            <p class="text-xs text-slate-400 mb-4">Importe les fichiers GPKG / SHP qui alimentent la configuration de résilience.</p>
 
-                <div class="button-container">
-                    <button type="button" id="resilience-upload-btn" class="btn-import-green">Importer dans la Base</button>
-                </div>
-            </form>
-        </section>
+                            <form id="resilience-form" enctype="multipart/form-data" class="space-y-4">
+                                <div class="border-2 border-dashed border-slate-700 bg-slate-950 rounded-lg p-4">
+                                    <label for="resilience-files" class="block text-sm font-medium text-slate-300 mb-2">Fichiers GPKG ou Shapefile</label>
+                                    <input type="file" id="resilience-files" name="files" multiple accept=".gpkg,.shp,.shx,.dbf,.prj,.cpg,.sbn,.sbx" class="w-full text-sm text-slate-300">
+                                </div>
 
-        <!-- Section Affichage -->
-        <section class="section">
-            <h2>Affichage des Couches Résilience</h2>
-            <div style="display: flex; gap: 30px;">
-                <!-- Gauche : couches principales affichables -->
-                <div style="flex:2;">
-                    <div style="display: flex; gap: 20px; align-items: center; margin-bottom: 20px;">
-                        <label for="layer-selector"><strong>Choisir une couche :</strong></label>
-                        <select id="layer-selector"></select>
-                        <label for="color-picker"><strong>Couleur :</strong></label>
-                        <input type="color" id="color-picker" value="#005aa3">
+                                <div id="file-names-container" class="space-y-2"></div>
+
+                                <button type="button" id="resilience-upload-btn" class="w-full bg-brand-600 hover:bg-brand-500 text-white font-bold py-3 rounded transition-colors shadow-lg shadow-brand-500/20">
+                                    Importer dans la base
+                                </button>
+
+                                <div id="import-feedback" class="hidden-element"></div>
+                            </form>
+                        </section>
+
+                        <hr class="border-slate-800">
+
+                        <section class="alea-support-card rounded-xl p-6 shadow-2xl">
+                            <div class="alea-support-meta">
+                                <div>
+                                    <h3 class="text-lg font-bold text-slate-100">Couches de support (aléas)</h3>
+                                    <p class="text-xs text-slate-500 mt-2 font-medium">Couches d'aléa disponibles pour l'analyse de résilience</p>
+                                </div>
+                                <span id="alea-support-count">0 couche</span>
+                            </div>
+
+                            <div id="alea-support-list">
+                                <!-- Les aléas s'affichent ici -->
+                            </div>
+                        </section>
                     </div>
-                    <div class="section" style="margin-bottom: 20px;">
-                        <h3>Gestion des couches visibles</h3>
-                        <div id="layer-controls" class="file-list"></div>
+                </div>
+
+                <div class="w-2/3 bg-slate-950 rounded-lg border border-slate-800 flex flex-col relative overflow-hidden p-4">
+                    <div class="flex items-center gap-3 mb-3">
+                        <label for="layer-selector" class="text-sm font-medium text-slate-300">Couche affichée</label>
+                        <select id="layer-selector" class="bg-slate-900 border border-slate-700 text-slate-200 rounded p-2 text-sm min-w-[220px]"></select>
+                        <label for="color-picker" class="text-sm font-medium text-slate-300">Couleur</label>
+                        <input type="color" id="color-picker" value="#06b6d4" class="w-10 h-10 p-1 rounded border border-slate-700 bg-slate-900">
+                    </div>
+
+                    <div id="resilience-map" class="flex-1"></div>
+
+                    <div class="mt-3 bg-slate-900 border border-slate-800 rounded-lg p-3">
+                        <h3 class="text-sm font-semibold mb-2 text-slate-100 uppercase tracking-wide">Gestion des couches visibles</h3>
+                        <div id="layer-controls"></div>
                     </div>
                 </div>
-                <!-- Droite : couches support (alea) -->
-                <div style="flex:1; border-left: 1px solid #eee; padding-left:20px;">
-                    <h3>Couches de support <span title="Non affichables sur la carte" style="color:#999;font-size:1em;">&#9432;</span></h3>
-                    <div id="alea-support-list" style="font-size:0.95em; color:#444; line-height: 1.8;"></div>
+            </div>
+
+            <div id="page-analyse" class="hidden-element w-full max-w-5xl mx-auto overflow-y-auto pb-10 h-full">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-100">Nouvelle Analyse de Résilience</h2>
+
+                <div class="bg-slate-900 p-6 rounded-lg border border-slate-800 mb-4">
+                    <h3 class="text-sm font-semibold mb-3 text-slate-400 uppercase tracking-wide">Injection des stress</h3>
+                    <p class="text-xs text-brand-400 mb-4 bg-brand-900/20 p-3 rounded border border-brand-800/50">
+                        L'injection de stress correspond aux couches aléas sélectionnées ci-dessous.
+                        Le calcul de résilience lance la création de la vue matérialisée sur la couche principale.
+                    </p>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
+                        <label class="text-sm text-slate-300">
+                            Couche principale
+                            <select id="alea-main-layer" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200"></select>
+                        </label>
+
+                        <div>
+                            <div class="alea-select-toolbar">
+                                <label for="layer-alea" class="text-sm text-slate-300">Couches aléa (injection de stress)</label>
+                                <span id="alea-selected-count">0/0</span>
+                            </div>
+                            <select id="layer-alea" multiple class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200 min-h-[120px]"></select>
+                            <p id="alea-selection-helper" class="mt-2">Mode automatique: toutes les couches aléa seront injectées.</p>
+                            <button type="button" id="alea-clear-btn">Vider la sélection manuelle</button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                        <label class="flex items-center gap-2 text-sm text-slate-300 bg-slate-950/70 border border-slate-700 rounded-lg px-3 py-2">
+                            <input type="checkbox" id="alea-all" checked>
+                            Prendre toutes les couches aléa
+                        </label>
+
+                        <label class="text-sm text-slate-300">
+                            Nom de la vue matérialisée
+                            <input type="text" id="alea-view-name" placeholder="ex: ma_couche_alea_view" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200">
+                        </label>
+                    </div>
+                </div>
+
+                <button id="alea-run-btn" class="w-full bg-brand-600 hover:bg-brand-500 text-white py-4 rounded-lg font-bold shadow-lg transition-colors text-lg">
+                    Initier le calcul de résilience
+                </button>
+
+                <div class="bg-slate-900 border border-slate-800 p-4 rounded-lg mt-4">
+                    <span id="alea-progress" class="inline-flex items-center bg-brand-900/30 text-brand-400 border border-brand-800/50 rounded-full px-3 py-1 text-xs" style="display:none;"></span>
+
+                    <div class="flex flex-wrap gap-3 mt-3">
+                        <a id="alea-download-link" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded text-sm" href="#" style="display:none;">Télécharger CSV</a>
+                        <a id="alea-download-gpkg" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded text-sm" href="#" style="display:none;">Télécharger GPKG</a>
+                        <a id="alea-download-shp" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded text-sm" href="#" style="display:none;">Télécharger Shapefile</a>
+                    </div>
+
+                    <div id="alea-log" class="mt-4 bg-slate-950 border border-slate-800 rounded p-3 text-xs font-mono text-slate-300 min-h-[90px] max-h-[220px] overflow-y-auto"></div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 rounded-lg p-4 mt-6">
+                    <h3 class="text-sm font-semibold mb-3 text-slate-400 uppercase tracking-wide">Table Attributaire</h3>
+                    <div class="flex items-center gap-3 mb-3">
+                        <label for="table-selector" class="text-sm text-slate-300">Table</label>
+                        <select id="table-selector" class="bg-slate-950 border border-slate-700 rounded p-2 text-slate-200 min-w-[260px]"></select>
+                    </div>
+                    <div id="table-container" class="overflow-x-auto"></div>
                 </div>
             </div>
-            <div id="resilience-map" style="height: 600px; margin-top: 20px;"></div>
-        </section>
 
-
-
-        <!-- Section Test aléas -->
-        <section class="section">
-            <h2>Visualiser les aléas sur une couche</h2>
-            <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
-                <label for="alea-main-layer"><strong>Couche principale :</strong></label>
-                <select id="alea-main-layer"></select>
-                <button type="button" id="alea-run-btn" class="btn-import-green">Lancer le test</button>
-                <span id="alea-progress" style="color:#555;"></span>
-                <a id="alea-download-link" href="#" style="display:none; font-weight:bold;">Télécharger le CSV</a>
-            </div>
-            <div id="alea-log" class="file-list" style="margin-top:10px;"></div>
-        </section>
-
-
-        <div class="section" style="margin-top: 20px;">
-
-        <section class="section">
-            <h2>Créer une Vue Matérialisée</h2>
-            <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px;">
-                <label><strong>Table principale :</strong>
-                    <select id="layer-main"></select>
-                </label>
-                <label><strong>Couches alea (support) :</strong>
-                    <select id="layer-alea" multiple></select>
-                </label>
-                <input type="text" id="view-name" placeholder="Nom de la vue (ex: inond_reso)" required>
-                <div>
-                    <button id="preview-view-btn" type="button" style="font-weight:bold;">Aperçu de la vue matérialisée</button>
-                    <button id="create-view-btn" class="btn-import-green" type="button">Créer la Vue</button>
+            <div id="page-historique" class="hidden-element w-full max-w-6xl mx-auto overflow-y-auto pb-10 h-full">
+                <div class="flex justify-between items-end mb-6">
+                    <h2 class="text-2xl font-semibold text-slate-100">Historique des Runs</h2>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <input id="history-search" type="text" placeholder="Rechercher un run..." class="bg-slate-900 border border-slate-800 text-sm p-2 rounded w-64 focus:outline-none focus:border-brand-500">
+                        <button id="history-refresh-btn" type="button" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded text-sm">Actualiser</button>
+                        <button id="history-delete-selected-btn" type="button" disabled class="bg-red-900/40 border border-red-800/60 hover:bg-red-800/70 disabled:opacity-40 disabled:cursor-not-allowed text-red-200 px-3 py-2 rounded text-sm">Supprimer sélection</button>
+                        <button id="history-reset-btn" type="button" class="bg-red-950/70 border border-red-900 hover:bg-red-900/70 text-red-200 px-3 py-2 rounded text-sm">Tout réinitialiser</button>
+                    </div>
+                </div>
+                <p id="history-selection-info" class="text-xs text-slate-500 mb-2">Aucun run sélectionné.</p>
+                <div class="bg-slate-900 shadow-lg rounded-lg border border-slate-800 overflow-x-auto">
+                    <table class="w-full text-left text-sm whitespace-nowrap">
+                        <thead class="bg-slate-950 text-slate-400 font-mono border-b border-slate-800">
+                            <tr>
+                                <th class="py-3 px-4 font-medium w-10 text-center">
+                                    <input id="history-select-all" type="checkbox" class="accent-cyan-500">
+                                </th>
+                                <th class="py-3 px-4 font-medium">RUN_ID</th>
+                                <th class="py-3 px-4 font-medium">Couche principale</th>
+                                <th class="py-3 px-4 font-medium">Stress injectés</th>
+                                <th class="py-3 px-4 font-medium">Statut</th>
+                                <th class="py-3 px-4 font-medium text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-list" class="divide-y divide-slate-800/50"></tbody>
+                    </table>
                 </div>
             </div>
-            <div id="view-summary" style="margin-top: 20px;"></div>
-        </section>
 
-
-        <!-- Section Table -->
-        <section class="section">
-            <h2>Table Attributaire</h2>
-
-            <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 15px;">
-                <label for="table-selector"><strong>Choisir une table :</strong></label>
-                <select id="table-selector"></select>
+            <div id="page-users" class="hidden-element w-full max-w-5xl mx-auto overflow-y-auto pb-10 h-full">
+                <h2 class="text-2xl font-semibold text-slate-100 mb-6">Administration & Utilisateurs</h2>
+                <div class="bg-slate-900 border border-slate-800 rounded-lg p-6">
+                    <p class="text-slate-400 text-sm">Espace administration prêt pour gestion des accès/rôles.</p>
+                </div>
             </div>
 
-            <div id="table-container" class="file-list"></div>
-        </section>
-
-
+            <div id="page-aide" class="hidden-element w-full max-w-4xl mx-auto overflow-y-auto pb-10 h-full">
+                <h2 class="text-3xl font-semibold text-slate-100 mb-6">Manuel d'utilisation SippeRésiste</h2>
+                <div class="bg-slate-900 border border-slate-800 rounded-lg p-8 shadow-lg space-y-3 text-sm text-slate-300">
+                    <p>1. Configuration: importer les couches et contrôler leur affichage cartographique.</p>
+                    <p>2. Analyse Réseau: sélectionner les couches aléa (injection de stress), puis initier le calcul de résilience.</p>
+                    <p>3. Résultats: suivre le log, récupérer les exports CSV/GPKG/SHP et consulter la table attributaire.</p>
+                </div>
+            </div>
+        </main>
     </div>
-</main>
 
-<script src="{{ url_for('static', filename='js/resilience.js') }}"></script>
+    <script>
+        function switchTab(tabName) {
+            ['config', 'analyse', 'historique', 'users', 'aide'].forEach(name => {
+                document.getElementById('page-' + name).classList.add('hidden-element');
+                document.getElementById('nav-' + name).className = "pb-1 border-b-2 border-transparent hover:text-slate-100";
+            });
+            document.getElementById('page-' + tabName).classList.remove('hidden-element');
+            document.getElementById('nav-' + tabName).className = "pb-1 border-b-2 border-brand-400 text-brand-400";
 
+            if (tabName === 'config' && window.__resilienceMap) {
+                setTimeout(() => window.__resilienceMap.invalidateSize(), 120);
+            }
+            if (tabName === 'historique' && typeof window.loadResilienceHistory === 'function') {
+                window.loadResilienceHistory();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            switchTab('config');
+        });
+    </script>
+
+    <script src="{{ url_for('static', filename='js/resilience.js') }}"></script>
 </body>
 </html>
