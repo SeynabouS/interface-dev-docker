@@ -48,6 +48,8 @@ document.addEventListener('DOMContentLoaded', function () {
     let historySearchTimer = null;
     const importFeedback = document.getElementById('import-feedback');
     let importFeedbackTimer = null;
+    const layerActionFeedback = document.getElementById('layer-action-feedback');
+    let layerActionFeedbackTimer = null;
 
     // ========== Upload de fichiers ========== //
     const SHP_EXTS = new Set(['.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
@@ -74,6 +76,92 @@ document.addEventListener('DOMContentLoaded', function () {
         const withSpaces = stripped.replaceAll('_', ' ').replace(/\s+/g, ' ').trim();
         if (!withSpaces) return String(layer);
         return withSpaces.replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+
+    function layerTypeLabel(type) {
+        if (type === 'materialized_view') return 'vue materialisee';
+        if (type === 'view') return 'vue';
+        if (type === 'table') return 'table';
+        return 'objet';
+    }
+
+    function normalizeLayerDependencies(dependencies) {
+        if (!Array.isArray(dependencies)) return [];
+        return dependencies
+            .map((dep) => {
+                if (!dep) return null;
+                if (typeof dep === 'string') {
+                    const name = dep.trim();
+                    return name ? { name, type: 'object', label: 'objet' } : null;
+                }
+
+                const name = String(dep.name || '').trim();
+                if (!name) return null;
+
+                const type = String(dep.type || 'object').trim();
+                const label = String(dep.label || layerTypeLabel(type)).trim();
+                return { name, type, label };
+            })
+            .filter(Boolean);
+    }
+
+    function buildLayerDeleteConfirmMessage(layer, details) {
+        const typeLabel = layerTypeLabel(details && details.layer_type);
+        const dependencies = normalizeLayerDependencies(details && details.dependencies);
+        const lines = [
+            `Suppression de la couche "${layer}"`,
+            '',
+            `Type detecte : ${typeLabel}.`,
+            "Cette action supprimera definitivement cette couche de la base Resilience."
+        ];
+
+        if (dependencies.length) {
+            lines.push(
+                '',
+                `Impact detecte : ${dependencies.length} dependance(s) seront aussi supprimee(s) en cascade :`
+            );
+            dependencies.forEach((dep) => {
+                lines.push(`- ${dep.name} (${dep.label})`);
+            });
+        } else {
+            lines.push('', 'Aucune dependance applicative detectee.');
+        }
+
+        lines.push('', 'Cette action est irreversible.', 'Confirmer la suppression ?');
+        return lines.join('\n');
+    }
+
+    function buildLayerDeleteFallbackMessage(layer, errorMessage) {
+        return [
+            `Suppression de la couche "${layer}"`,
+            '',
+            "L'impact n'a pas pu etre verifie avant suppression.",
+            `Detail : ${errorMessage || 'information indisponible'}.`,
+            '',
+            'La suppression reste irreversible.',
+            'Souhaitez-vous continuer ?'
+        ].join('\n');
+    }
+
+    function buildLayerDeleteSuccessMessage(result, layer) {
+        const dependencies = normalizeLayerDependencies(result && result.dependencies);
+        const lines = [
+            `Suppression terminee pour la couche "${layer}".`
+        ];
+
+        if (dependencies.length) {
+            lines.push(
+                `${dependencies.length} dependance(s) ont aussi ete supprimee(s) en cascade : ${dependencies.map((dep) => dep.name).join(', ')}.`
+            );
+        } else {
+            lines.push('Aucune dependance supplementaire n\'a ete supprimee.');
+        }
+
+        return lines.join(' ');
+    }
+
+    function buildLayerDeleteErrorMessage(layer, errorMessage) {
+        return `Suppression impossible pour la couche "${layer}" : ${errorMessage || 'erreur inconnue.'}`;
     }
 
     function updateAleaSelectedCount() {
@@ -294,6 +382,17 @@ document.addEventListener('DOMContentLoaded', function () {
         importFeedbackTimer = setTimeout(() => {
             importFeedback.classList.add('hidden-element');
         }, 6000);
+    }
+
+    function showLayerActionFeedback(message, type = 'success') {
+        if (!layerActionFeedback) return;
+        if (layerActionFeedbackTimer) clearTimeout(layerActionFeedbackTimer);
+        layerActionFeedback.classList.remove('hidden-element', 'success', 'error');
+        layerActionFeedback.classList.add(type === 'error' ? 'error' : 'success');
+        layerActionFeedback.textContent = message;
+        layerActionFeedbackTimer = setTimeout(() => {
+            layerActionFeedback.classList.add('hidden-element');
+        }, 8000);
     }
 
     function buildDatasets(files) {
@@ -916,40 +1015,59 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
-    layerControls.addEventListener('click', function (e) {
-        if (!e.target.classList.contains('delete-layer-btn')) return;
-        const layer = e.target.dataset.layer;
-        fetch(`/resilience_dependencies/${layer}`)
-            .then(r => r.json())
-            .then(data => {
-                const deps = data.dependencies;
-                let msg = `Voulez-vous vraiment supprimer la couche "${layer}" ?`;
-                if (deps.length) {
-                    msg += `\n\n⚠️ Utilisée dans :\n - ${deps.join("\n - ")}`;
-                }
-                msg += "\n\nCette action est irréversible.";
+    layerControls.addEventListener('click', async function (e) {
+        const deleteBtn = e.target.closest('.delete-layer-btn');
+        if (!deleteBtn) return;
 
-                if (confirm(msg)) {
-                    fetch('/delete_resilience_layer', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ layer })
-                    })
-                    .then(r => r.json())
-                    .then(result => {
-                        if (result.status === 'ok') {
-                            alert(`✅ Couche "${layer}" supprimée.`);
-                            updateLayerList();
-                            if (layerStore[layer]) {
-                                map.removeLayer(layerStore[layer]);
-                                delete layerStore[layer];
-                            }
-                        } else {
-                            alert(`❌ Erreur : ${result.message}`);
-                        }
-                    });
-                }
+        const layer = String(deleteBtn.dataset.layer || '').trim();
+        if (!layer) return;
+
+        let dependencyDetails = null;
+        try {
+            const dependencyResponse = await fetch(`/resilience_dependencies/${encodeURIComponent(layer)}`);
+            const dependencyPayload = await dependencyResponse.json().catch(() => ({}));
+            if (!dependencyResponse.ok || dependencyPayload.status === 'error') {
+                throw new Error(dependencyPayload.message || `HTTP ${dependencyResponse.status}`);
+            }
+            dependencyDetails = dependencyPayload;
+        } catch (err) {
+            const fallbackMessage = buildLayerDeleteFallbackMessage(layer, err.message);
+            if (!confirm(fallbackMessage)) {
+                return;
+            }
+        }
+
+        if (dependencyDetails && !confirm(buildLayerDeleteConfirmMessage(layer, dependencyDetails))) {
+            return;
+        }
+
+        deleteBtn.disabled = true;
+        const originalLabel = deleteBtn.textContent;
+        deleteBtn.textContent = 'Suppression...';
+
+        try {
+            const response = await fetch('/delete_resilience_layer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ layer })
             });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || result.status !== 'ok') {
+                throw new Error(result.message || `HTTP ${response.status}`);
+            }
+
+            showLayerActionFeedback(buildLayerDeleteSuccessMessage(result, layer), 'success');
+            updateLayerList();
+            if (layerStore[layer]) {
+                map.removeLayer(layerStore[layer]);
+                delete layerStore[layer];
+            }
+        } catch (err) {
+            showLayerActionFeedback(buildLayerDeleteErrorMessage(layer, err.message), 'error');
+        } finally {
+            deleteBtn.disabled = false;
+            deleteBtn.textContent = originalLabel;
+        }
     });
 
     updateHistorySelectionUi();

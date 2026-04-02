@@ -35,9 +35,12 @@ from zipfile import ZipFile
 import tempfile, requests
 from flask import jsonify, request
 import re
+import shutil
+import subprocess
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from dotenv import load_dotenv
 from sqlalchemy.sql.elements import quoted_name as sa_quoted_name
+from pyproj import CRS
 load_dotenv() 
 
 from sqlalchemy import create_engine, text
@@ -404,6 +407,268 @@ def serve_image(filename):
 DEFAULT_SRID = 2154  # Lambert-93
 SIDE_CAR_EXTS = {'.dbf', '.shx', '.prj', '.cpg', '.sbn', '.sbx'}
 
+
+def _source_label(path: str, layer: str | None = None) -> str:
+    base = os.path.basename(path)
+    return f"{base}::{layer}" if layer else base
+
+
+def _is_safe_ogr_identifier(identifier: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_]+", str(identifier or "")))
+
+
+def _escape_ogr_pg_value(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _build_ogr_pg_dsn(schema: str | None = None) -> str:
+    params = {
+        "host": os.getenv("DB_HOST", "db"),
+        "port": os.getenv("DB_PORT", "5432"),
+        "dbname": os.getenv("DB_NAME", "postgres"),
+        "user": os.getenv("DB_USERNAME", "postgres"),
+        "password": os.getenv("DB_PASSWORD", ""),
+    }
+    parts = [f"{key}='{_escape_ogr_pg_value(value)}'" for key, value in params.items() if value is not None]
+    if schema:
+        parts.append(f"active_schema='{_escape_ogr_pg_value(schema)}'")
+    return "PG:" + " ".join(parts)
+
+
+def _pick_vector_source_layer(path: str) -> str | None:
+    lower_path = str(path).lower()
+    if not lower_path.endswith(".gpkg"):
+        return None
+    layers = list(fiona.listlayers(path) or [])
+    if not layers:
+        return None
+    for layer in layers:
+        try:
+            with fiona.open(path, layer=layer) as src:
+                geom_name = ((src.schema or {}).get("geometry") or "").strip()
+                if geom_name:
+                    return layer
+        except Exception:
+            continue
+    return layers[0]
+
+
+def _inspect_vector_source(path: str, layer: str | None = None) -> dict:
+    open_kwargs = {"layer": layer} if layer else {}
+    with fiona.open(path, **open_kwargs) as src:
+        crs_input = src.crs_wkt or src.crs
+        crs_obj = None
+        if crs_input:
+            try:
+                crs_obj = CRS.from_user_input(crs_input)
+            except Exception as exc:
+                raise ValueError(f"CRS invalide pour {_source_label(path, layer)} : {exc}") from exc
+
+        feature_count = 0
+        null_geometry_count = 0
+        for feat in src:
+            feature_count += 1
+            if not feat.get("geometry"):
+                null_geometry_count += 1
+
+    return {
+        "layer": layer,
+        "feature_count": feature_count,
+        "null_geometry_count": null_geometry_count,
+        "crs": crs_obj,
+    }
+
+
+def _resolve_actual_table_name(conn, schema: str, table_name: str) -> str:
+    row = conn.execute(text("""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = :schema
+          AND lower(table_name) = lower(:table_name)
+        ORDER BY table_name
+        LIMIT 1
+    """), {"schema": schema, "table_name": table_name}).first()
+    if not row:
+        raise RuntimeError(
+            f"Table importée introuvable après chargement: {schema}.{table_name}"
+        )
+    return str(row[0])
+
+
+def _prepare_resilience_gdf_for_import(
+    gdf: gpd.GeoDataFrame,
+    source_label: str,
+    source_null_geometry_count: int,
+) -> gpd.GeoDataFrame:
+    if gdf.geometry.name != 'geometry':
+        if 'geometry' in gdf.columns:
+            new_col = 'geometry_attr'
+            i = 1
+            while new_col in gdf.columns:
+                new_col = f'geometry_attr{i}'
+                i += 1
+            gdf = gdf.rename(columns={'geometry': new_col})
+        gdf = gdf.rename_geometry('geometry')
+    if 'geometry' not in gdf.columns:
+        raise ValueError(f'Géométrie introuvable pour {source_label}')
+
+    geom_series = gpd.GeoSeries(
+        gdf['geometry'].apply(_repair_geometry_preserve_family),
+        crs=gdf.crs
+    ).reset_index(drop=True)
+
+    gdf = gdf.reset_index(drop=True).copy()
+    gdf["geometry"] = geom_series
+    gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=geom_series.crs or gdf.crs)
+
+    if gdf.empty:
+        raise ValueError(f'Couche vide pour {source_label}')
+
+    final_null_geometry_count = int(gdf["geometry"].isna().sum())
+    lost_geometry_count = max(final_null_geometry_count - int(source_null_geometry_count or 0), 0)
+    if lost_geometry_count > 0:
+        raise ValueError(
+            f"{source_label}: {lost_geometry_count} géométrie(s) non nulles ont été perdues "
+            "dans le fallback Python. L'import est refusé pour éviter des traitements spatiaux faux."
+        )
+
+    if gdf.crs is None:
+        raise ValueError(
+            f"Projection introuvable pour {source_label}. "
+            "Ajoutez le CRS au fichier source pour un import fidèle."
+        )
+
+    try:
+        source_crs = CRS.from_user_input(gdf.crs)
+    except Exception as exc:
+        raise ValueError(f"CRS invalide pour {source_label} : {exc}") from exc
+
+    if not source_crs.equals(CRS.from_epsg(DEFAULT_SRID)):
+        gdf = gdf.to_crs(epsg=DEFAULT_SRID)
+
+    return gdf
+
+
+def _import_vector_dataset_via_geopandas(path: str, table_name: str, schema: str = "resilience") -> dict:
+    layer = _pick_vector_source_layer(path)
+    source_info = _inspect_vector_source(path, layer)
+    source_name = _source_label(path, layer)
+    gdf = _read_geofile(path, layer=layer)
+    gdf = _prepare_resilience_gdf_for_import(gdf, source_name, source_info["null_geometry_count"])
+
+    with engine.begin() as conn:
+        gdf.to_postgis(
+            table_name,
+            conn,
+            schema=schema,
+            if_exists="replace",
+            index=False,
+            dtype={"geometry": Geometry("GEOMETRY", srid=DEFAULT_SRID)}
+        )
+        conn.execute(text(f'ANALYZE {_qualified_ident(schema, table_name)}'))
+
+    return {
+        "driver": "geopandas",
+        "layer": layer,
+        "source_rows": int(source_info["feature_count"] or 0),
+        "source_null_geometry_count": int(source_info["null_geometry_count"] or 0),
+    }
+
+
+def _import_vector_dataset_via_ogr(path: str, table_name: str, schema: str = "resilience") -> dict:
+    if shutil.which("ogr2ogr") is None:
+        raise RuntimeError("ogr2ogr indisponible dans l'environnement courant.")
+    if not _is_safe_ogr_identifier(schema) or not _is_safe_ogr_identifier(table_name):
+        raise ValueError(
+            f"Nom de table incompatible avec l'import GDAL direct : {table_name}. "
+            "Utilisez uniquement lettres, chiffres et underscore."
+        )
+
+    layer = _pick_vector_source_layer(path)
+    source_info = _inspect_vector_source(path, layer)
+    source_name = _source_label(path, layer)
+    source_crs = source_info["crs"]
+    if source_crs is None:
+        raise ValueError(
+            f"Projection introuvable pour {source_name}. "
+            "Ajoutez le CRS au fichier source pour un import fidèle."
+        )
+
+    cmd = [
+        "ogr2ogr",
+        "-f", "PostgreSQL",
+        _build_ogr_pg_dsn(schema),
+        path,
+    ]
+    if layer:
+        cmd.append(layer)
+    cmd.extend([
+        "-overwrite",
+        "-nln", table_name,
+        "-nlt", "GEOMETRY",
+        "-lco", f"SCHEMA={schema}",
+        "-lco", "GEOMETRY_NAME=geometry",
+        "--config", "PG_USE_COPY", "YES",
+    ])
+
+    target_crs = CRS.from_epsg(DEFAULT_SRID)
+    if not source_crs.equals(target_crs):
+        cmd.extend(["-t_srs", f"EPSG:{DEFAULT_SRID}"])
+
+    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            f"Import GDAL impossible pour {source_name}: {detail or 'erreur inconnue'}"
+        )
+
+    with engine.begin() as conn:
+        actual_table_name = _resolve_actual_table_name(conn, schema, table_name)
+        stats = conn.execute(text(f"""
+            SELECT
+                COUNT(*)::bigint AS row_count,
+                COUNT(*) FILTER (WHERE geometry IS NULL)::bigint AS null_geometry_count
+            FROM {_qualified_ident(schema, actual_table_name)}
+        """)).mappings().first()
+        conn.execute(text(f'ANALYZE {_qualified_ident(schema, actual_table_name)}'))
+
+    imported_rows = int((stats or {}).get("row_count") or 0)
+    imported_nulls = int((stats or {}).get("null_geometry_count") or 0)
+    expected_rows = int(source_info["feature_count"] or 0)
+    expected_nulls = int(source_info["null_geometry_count"] or 0)
+    if imported_rows != expected_rows:
+        raise RuntimeError(
+            f"Import GDAL incomplet pour {source_name}: {imported_rows} ligne(s) importée(s) "
+            f"au lieu de {expected_rows}."
+        )
+    if imported_nulls != expected_nulls:
+        raise RuntimeError(
+            f"Import GDAL incohérent pour {source_name}: {imported_nulls} géométrie(s) NULL en base "
+            f"alors que la source en contient {expected_nulls}."
+        )
+
+    return {
+        "driver": "ogr2ogr",
+        "layer": layer,
+        "actual_table_name": actual_table_name,
+        "source_rows": expected_rows,
+        "source_null_geometry_count": expected_nulls,
+        "imported_null_geometry_count": imported_nulls,
+    }
+
+
+def _import_vector_dataset_to_postgis(path: str, table_name: str, schema: str = "resilience") -> dict:
+    try:
+        return _import_vector_dataset_via_ogr(path, table_name, schema=schema)
+    except Exception as exc:
+        logging.warning(
+            "Import GDAL indisponible pour %s -> %s (%s). Bascule vers le fallback GeoPandas strict.",
+            path,
+            table_name,
+            exc,
+        )
+        return _import_vector_dataset_via_geopandas(path, table_name, schema=schema)
+
 def prepare_gdf_for_postgis(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     - Reprojette en L93 (2154)
@@ -546,7 +811,7 @@ def _repair_geometry_preserve_family(geom):
     return _coerce_geometry_value(repaired)
 
 
-def _read_geofile(path: str):
+def _read_geofile(path: str, layer: str | None = None):
     def _read_with_fiona_manual(fp: str):
         records = []
         geoms = []
@@ -580,8 +845,9 @@ def _read_geofile(path: str):
     lower_path = str(path).lower()
     if lower_path.endswith((".gpkg", ".geojson", ".json", ".geojsonl")):
         if lower_path.endswith(".gpkg"):
-            return _read_gpkg_safe(path)
-        return gpd.read_file(path)
+            return _read_gpkg_safe(path, layer=layer)
+        read_kwargs = {"layer": layer} if layer else {}
+        return gpd.read_file(path, **read_kwargs)
 
     # Shapefile et assimilés : lecteur manuel robuste
     return _read_with_fiona_manual(path)
@@ -5282,54 +5548,15 @@ def upload_resilience():
                 # Fallback: si aucun nom saisi, on prend le nom du fichier/couche.
                 name = ds["default_name"]
             try:
-                try:
-                    gdf = _read_geofile(ds["path"])
-                except Exception as read_err:
-                    return jsonify({'status': 'error', 'message': f'Erreur lecture {os.path.basename(ds["path"])} : {str(read_err)}'})
-                if gdf.geometry.name != 'geometry':
-                    if 'geometry' in gdf.columns:
-                        new_col = 'geometry_attr'
-                        i = 1
-                        while new_col in gdf.columns:
-                            new_col = f'geometry_attr{i}'
-                            i += 1
-                        gdf = gdf.rename(columns={'geometry': new_col})
-                    gdf = gdf.rename_geometry('geometry')
-                if 'geometry' not in gdf.columns:
-                    return jsonify({'status': 'error', 'message': f'Géométrie introuvable pour {ds["key"]}'} )
-
-                # Coercion + réparation sans supprimer de lignes:
-                # toute géométrie non exploitable reste NULL.
-                def _repair_or_null(geom):
-                    return _repair_geometry_preserve_family(geom)
-
-                geom_series = gpd.GeoSeries(
-                    gdf['geometry'].apply(_repair_or_null),
-                    crs=gdf.crs
-                ).reset_index(drop=True)
-
-                gdf = gdf.reset_index(drop=True).copy()
-                gdf["geometry"] = geom_series
-                gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=geom_series.crs or gdf.crs)
-
-                if gdf.empty:
-                    return jsonify({'status': 'error', 'message': f'Couche vide pour {ds["key"]}'} )
-
-                if gdf.crs is None:
-                    gdf = gdf.set_crs(epsg=4326)
-                if gdf.crs.to_epsg() != 2154:
-                    gdf = gdf.to_crs(epsg=2154)
-                with engine.begin() as conn:
-                    gdf.to_postgis(
-                        name,
-                        conn,
-                        schema="resilience",
-                        if_exists="replace",
-                        index=False,
-                        dtype={"geometry": Geometry("GEOMETRY", srid=2154)}
-                    )
-                    # Rafraîchit les stats pour accélérer la détection de clé côté batch.
-                    conn.execute(text(f'ANALYZE "resilience".{_quote_ident(name)}'))
+                import_meta = _import_vector_dataset_to_postgis(ds["path"], name, schema="resilience")
+                logging.info(
+                    "Import résilience %s -> %s via %s (%s lignes, %s géométrie(s) NULL source).",
+                    ds["key"],
+                    name,
+                    import_meta.get("driver", "unknown"),
+                    import_meta.get("source_rows", "?"),
+                    import_meta.get("source_null_geometry_count", "?"),
+                )
             except Exception as e:
                 return jsonify({'status': 'error', 'message': f'Erreur traitement {os.path.basename(ds["path"])} : {str(e)}'})
 
@@ -5429,13 +5656,26 @@ def get_resilience_layers_support():
 @app.route('/resilience_dependencies/<layer>')
 def resilience_dependencies(layer):
     with engine.begin() as conn:
-        result = conn.execute(text("""
-            SELECT matviewname FROM pg_matviews
-            WHERE schemaname = 'resilience'
-              AND definition ILIKE :pattern;
-        """), {"pattern": f"%{layer}%"})
-        deps = [row[0] for row in result]
-    return jsonify({"dependencies": deps})
+        layer_type = _get_resilience_object_kind(conn, layer)
+        if layer_type is None:
+            return jsonify({
+                "status": "error",
+                "message": f'Couche "{layer}" introuvable.'
+            }), 404
+        if not _has_column(conn, 'resilience', layer, 'geometry'):
+            return jsonify({
+                "status": "error",
+                "message": f'"{layer}" n\'est pas une couche cartographique.'
+            }), 400
+        deps = _list_resilience_dependencies(conn, layer)
+    return jsonify({
+        "status": "ok",
+        "layer": layer,
+        "layer_type": layer_type,
+        "layer_type_label": _resilience_object_kind_label(layer_type),
+        "dependency_count": len(deps),
+        "dependencies": deps
+    })
 
 
 # route de suppression d'une couche
@@ -5448,19 +5688,42 @@ def delete_resilience_layer():
 
     try:
         with engine.begin() as conn:
-            is_matview = conn.execute(text("""
-                SELECT 1
-                FROM pg_matviews
-                WHERE schemaname = 'resilience' AND matviewname = :layer
-            """), {"layer": layer}).first() is not None
+            layer_type = _get_resilience_object_kind(conn, layer)
+            if layer_type is None:
+                return jsonify({
+                    "status": "error",
+                    "message": f'Couche "{layer}" introuvable.'
+                }), 404
+            if not _has_column(conn, 'resilience', layer, 'geometry'):
+                return jsonify({
+                    "status": "error",
+                    "message": f'"{layer}" n\'est pas une couche cartographique.'
+                }), 400
+
+            deps = _list_resilience_dependencies(conn, layer)
             q_layer = _quote_ident(layer)
-            if is_matview:
+            if layer_type == 'materialized_view':
                 conn.execute(text(f'DROP MATERIALIZED VIEW IF EXISTS "resilience".{q_layer} CASCADE'))
+            elif layer_type == 'view':
+                conn.execute(text(f'DROP VIEW IF EXISTS "resilience".{q_layer} CASCADE'))
             else:
                 conn.execute(text(f'DROP TABLE IF EXISTS "resilience".{q_layer} CASCADE'))
-        return jsonify({"status": "ok"})
+
+        message = f'Couche "{layer}" supprimee de la base Resilience.'
+        if deps:
+            message += f" {len(deps)} dependance(s) ont aussi ete supprimee(s) en cascade."
+
+        return jsonify({
+            "status": "ok",
+            "message": message,
+            "layer": layer,
+            "layer_type": layer_type,
+            "layer_type_label": _resilience_object_kind_label(layer_type),
+            "dependency_count": len(deps),
+            "dependencies": deps
+        })
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # route de téléchargement d'une couche
@@ -5533,6 +5796,68 @@ def _has_column(conn, schema, table, col):
     return conn.execute(q, {"schema": schema, "table": table, "col": col}).first() is not None
 
 
+def _get_resilience_object_kind(conn, name: str) -> str | None:
+    row = conn.execute(text("""
+        SELECT 'materialized_view' AS kind
+        FROM pg_matviews
+        WHERE schemaname = 'resilience' AND matviewname = :name
+        UNION ALL
+        SELECT CASE
+            WHEN table_type = 'VIEW' THEN 'view'
+            ELSE 'table'
+        END AS kind
+        FROM information_schema.tables
+        WHERE table_schema = 'resilience' AND table_name = :name
+        LIMIT 1
+    """), {"name": name}).first()
+    return row[0] if row else None
+
+
+def _resilience_object_kind_label(kind: str | None) -> str:
+    return {
+        "table": "table",
+        "view": "vue",
+        "materialized_view": "vue materialisee",
+    }.get(kind, "objet")
+
+
+def _list_resilience_dependencies(conn, layer: str) -> list[dict[str, str]]:
+    rows = conn.execute(text("""
+        SELECT DISTINCT
+            dependent_view.relname AS name,
+            CASE dependent_view.relkind
+                WHEN 'm' THEN 'materialized_view'
+                WHEN 'v' THEN 'view'
+                ELSE 'object'
+            END AS kind
+        FROM pg_depend dep
+        JOIN pg_rewrite rw
+          ON rw.oid = dep.objid
+        JOIN pg_class dependent_view
+          ON dependent_view.oid = rw.ev_class
+        JOIN pg_namespace dependent_ns
+          ON dependent_ns.oid = dependent_view.relnamespace
+        JOIN pg_class source_rel
+          ON source_rel.oid = dep.refobjid
+        JOIN pg_namespace source_ns
+          ON source_ns.oid = source_rel.relnamespace
+        WHERE source_ns.nspname = 'resilience'
+          AND source_rel.relname = :layer
+          AND dependent_ns.nspname = 'resilience'
+          AND dependent_view.relkind IN ('m', 'v')
+          AND dependent_view.relname <> :layer
+        ORDER BY dependent_view.relname
+    """), {"layer": layer}).mappings().all()
+    return [
+        {
+            "name": row["name"],
+            "type": row["kind"],
+            "label": _resilience_object_kind_label(row["kind"]),
+        }
+        for row in rows
+    ]
+
+
 def _object_exists(schema: str, name: str) -> bool:
     """
     Retourne True si une table, vue ou vue matérialisée existe.
@@ -5555,14 +5880,14 @@ def _object_exists(schema: str, name: str) -> bool:
         return conn.execute(q, {"s": schema, "n": name}).first() is not None
 
 
-def _read_gpkg_safe(path: str) -> gpd.GeoDataFrame:
+def _read_gpkg_safe(path: str, layer: str | None = None) -> gpd.GeoDataFrame:
     """
     Lecture robuste d'un GPKG : essaie geopandas, sinon fiona layer par layer en filtrant les géométries invalides.
     """
     try:
         return gpd.read_file(path)
     except Exception as exc:
-        layers = fiona.listlayers(path)
+        layers = [layer] if layer else fiona.listlayers(path)
         if not layers:
             raise exc
         last_err = exc
