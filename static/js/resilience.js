@@ -12,12 +12,17 @@ document.addEventListener('DOMContentLoaded', function () {
     const fileInput = document.getElementById('resilience-files');
     const fileNamesContainer = document.getElementById('file-names-container');
     const uploadBtn = document.getElementById('resilience-upload-btn');
+    const analysisFileInput = document.getElementById('analysis-layer-files');
+    const analysisFileNamesContainer = document.getElementById('analysis-file-names-container');
+    const analysisUploadBtn = document.getElementById('analysis-upload-btn');
 
     const layerSelect = document.getElementById('layer-selector');
     const colorPicker = document.getElementById('color-picker');
     const tableContainer = document.getElementById('table-container');
     const tableSelector = document.getElementById('table-selector');
     const layerControls = document.getElementById('layer-controls');
+    const impactMatrixContainer = document.getElementById('impact-matrix-container');
+    const impactMatrixSaveBtn = document.getElementById('impact-matrix-save-btn');
 
     // === Sélection des couches pour vue matérialisée ===
     const layerAlea = document.getElementById('layer-alea');
@@ -48,14 +53,19 @@ document.addEventListener('DOMContentLoaded', function () {
     let historySearchTimer = null;
     const importFeedback = document.getElementById('import-feedback');
     let importFeedbackTimer = null;
+    const analysisImportFeedback = document.getElementById('analysis-import-feedback');
+    let analysisImportFeedbackTimer = null;
     const layerActionFeedback = document.getElementById('layer-action-feedback');
     let layerActionFeedbackTimer = null;
+    const impactMatrixFeedback = document.getElementById('impact-matrix-feedback');
+    let impactMatrixFeedbackTimer = null;
 
     // ========== Upload de fichiers ========== //
     const SHP_EXTS = new Set(['.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
     const SHP_REQUIRED = ['.shp', '.shx', '.dbf'];
     const ALLOWED_EXTS = new Set(['.gpkg', '.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
     let uploadDatasets = [];
+    let analysisUploadDatasets = [];
 
     function getExt(filename) {
         const idx = filename.lastIndexOf('.');
@@ -373,26 +383,219 @@ document.addEventListener('DOMContentLoaded', function () {
 
     window.loadResilienceHistory = loadResilienceHistory;
 
+    function showFeedback(element, timerName, message, type = 'success', delay = 6000) {
+        if (!element) return;
+
+        if (timerName === 'import' && importFeedbackTimer) clearTimeout(importFeedbackTimer);
+        if (timerName === 'analysis' && analysisImportFeedbackTimer) clearTimeout(analysisImportFeedbackTimer);
+        if (timerName === 'layer' && layerActionFeedbackTimer) clearTimeout(layerActionFeedbackTimer);
+        if (timerName === 'impact' && impactMatrixFeedbackTimer) clearTimeout(impactMatrixFeedbackTimer);
+
+        element.classList.remove('hidden-element', 'success', 'error');
+        element.classList.add(type === 'error' ? 'error' : 'success');
+        element.textContent = message;
+
+        const timer = setTimeout(() => {
+            element.classList.add('hidden-element');
+        }, delay);
+
+        if (timerName === 'import') importFeedbackTimer = timer;
+        if (timerName === 'analysis') analysisImportFeedbackTimer = timer;
+        if (timerName === 'layer') layerActionFeedbackTimer = timer;
+        if (timerName === 'impact') impactMatrixFeedbackTimer = timer;
+    }
+
     function showImportFeedback(message, type = 'success') {
-        if (!importFeedback) return;
-        if (importFeedbackTimer) clearTimeout(importFeedbackTimer);
-        importFeedback.classList.remove('hidden-element', 'success', 'error');
-        importFeedback.classList.add(type === 'error' ? 'error' : 'success');
-        importFeedback.textContent = message;
-        importFeedbackTimer = setTimeout(() => {
-            importFeedback.classList.add('hidden-element');
-        }, 6000);
+        showFeedback(importFeedback, 'import', message, type, 6000);
+    }
+
+    function showAnalysisImportFeedback(message, type = 'success') {
+        showFeedback(analysisImportFeedback, 'analysis', message, type, 6000);
     }
 
     function showLayerActionFeedback(message, type = 'success') {
-        if (!layerActionFeedback) return;
-        if (layerActionFeedbackTimer) clearTimeout(layerActionFeedbackTimer);
-        layerActionFeedback.classList.remove('hidden-element', 'success', 'error');
-        layerActionFeedback.classList.add(type === 'error' ? 'error' : 'success');
-        layerActionFeedback.textContent = message;
-        layerActionFeedbackTimer = setTimeout(() => {
-            layerActionFeedback.classList.add('hidden-element');
-        }, 8000);
+        showFeedback(layerActionFeedback, 'layer', message, type, 8000);
+    }
+
+    function showImpactMatrixFeedback(message, type = 'success') {
+        showFeedback(impactMatrixFeedback, 'impact', message, type, 7000);
+    }
+
+    function renderImpactMatrix(payload) {
+        if (!impactMatrixContainer) return;
+
+        const levels = Array.isArray(payload && payload.levels) ? payload.levels : [];
+        const layers = Array.isArray(payload && payload.layers) ? payload.layers : [];
+
+        if (!layers.length || !levels.length) {
+            impactMatrixContainer.innerHTML = '<em>Aucune couche d\'aléa configurée pour la matrice.</em>';
+            return;
+        }
+
+        const headerCells = levels.map((level) => `
+            <th>Niveau ${escapeHtml(String(level))}</th>
+        `).join('');
+
+        const bodyRows = layers.map((layer) => {
+            const layerName = String(layer.layer_name || '').trim();
+            const safeLayer = escapeHtml(layerName);
+            const title = escapeHtml(prettifyLayerName(layerName));
+            const cells = levels.map((level) => {
+                const rawValue = layer && layer.values ? layer.values[String(level)] : 0;
+                const value = rawValue === null || rawValue === undefined ? 0 : rawValue;
+                return `
+                    <td>
+                        <input
+                            type="number"
+                            step="any"
+                            class="impact-matrix-input"
+                            data-layer="${safeLayer}"
+                            data-level="${escapeHtml(String(level))}"
+                            value="${escapeHtml(String(value))}"
+                        >
+                    </td>
+                `;
+            }).join('');
+
+            return `
+                <tr>
+                    <th class="impact-matrix-row-label">
+                        <div class="impact-matrix-header">
+                            <div class="impact-matrix-title">${title}</div>
+                            <button type="button" class="impact-matrix-delete" data-layer="${safeLayer}">Supprimer</button>
+                        </div>
+                    </th>
+                    ${cells}
+                </tr>
+            `;
+        }).join('');
+
+        impactMatrixContainer.innerHTML = `
+            <table>
+                <thead>
+                    <tr>
+                        <th>Couche d'aléa</th>
+                        ${headerCells}
+                    </tr>
+                </thead>
+                <tbody>
+                    ${bodyRows}
+                </tbody>
+            </table>
+        `;
+    }
+
+    function loadImpactMatrix() {
+        if (!impactMatrixContainer) return;
+        impactMatrixContainer.innerHTML = '<em>Chargement de la matrice des impacts...</em>';
+
+        fetch('/resilience_impact_matrix')
+            .then((r) => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
+            .then((payload) => {
+                if (payload.status === 'error') throw new Error(payload.message || 'Erreur matrice');
+                renderImpactMatrix(payload);
+            })
+            .catch((err) => {
+                impactMatrixContainer.innerHTML = `<em>Erreur de chargement: ${escapeHtml(err.message)}</em>`;
+            });
+    }
+
+    async function saveImpactMatrix() {
+        if (!impactMatrixContainer) return;
+
+        const values = {};
+        impactMatrixContainer.querySelectorAll('.impact-matrix-input[data-layer][data-level]').forEach((input) => {
+            const layer = String(input.dataset.layer || '').trim();
+            const level = String(input.dataset.level || '').trim();
+            if (!layer || !level) return;
+            if (!values[layer]) values[layer] = {};
+            values[layer][level] = input.value;
+        });
+
+        if (!Object.keys(values).length) {
+            showImpactMatrixFeedback("Aucune valeur à enregistrer dans la matrice.", 'error');
+            return;
+        }
+
+        if (impactMatrixSaveBtn) impactMatrixSaveBtn.disabled = true;
+        try {
+            const response = await fetch('/resilience_impact_matrix', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ values })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.status !== 'ok') {
+                throw new Error(payload.message || `HTTP ${response.status}`);
+            }
+
+            showImpactMatrixFeedback("Matrice des impacts enregistrée.", 'success');
+            loadImpactMatrix();
+        } catch (err) {
+            showImpactMatrixFeedback(`Enregistrement impossible: ${err.message}`, 'error');
+        } finally {
+            if (impactMatrixSaveBtn) impactMatrixSaveBtn.disabled = false;
+        }
+    }
+
+    async function deleteResilienceLayer(layer, triggerButton = null) {
+        const layerName = String(layer || '').trim();
+        if (!layerName) return;
+
+        let dependencyDetails = null;
+        try {
+            const dependencyResponse = await fetch(`/resilience_dependencies/${encodeURIComponent(layerName)}`);
+            const dependencyPayload = await dependencyResponse.json().catch(() => ({}));
+            if (!dependencyResponse.ok || dependencyPayload.status === 'error') {
+                throw new Error(dependencyPayload.message || `HTTP ${dependencyResponse.status}`);
+            }
+            dependencyDetails = dependencyPayload;
+        } catch (err) {
+            const fallbackMessage = buildLayerDeleteFallbackMessage(layerName, err.message);
+            if (!confirm(fallbackMessage)) {
+                return;
+            }
+        }
+
+        if (dependencyDetails && !confirm(buildLayerDeleteConfirmMessage(layerName, dependencyDetails))) {
+            return;
+        }
+
+        let originalLabel = null;
+        if (triggerButton) {
+            triggerButton.disabled = true;
+            originalLabel = triggerButton.textContent;
+            triggerButton.textContent = 'Suppression...';
+        }
+
+        try {
+            const response = await fetch('/delete_resilience_layer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ layer: layerName })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || result.status !== 'ok') {
+                throw new Error(result.message || `HTTP ${response.status}`);
+            }
+
+            showLayerActionFeedback(buildLayerDeleteSuccessMessage(result, layerName), 'success');
+            updateLayerList();
+            if (layerStore[layerName]) {
+                map.removeLayer(layerStore[layerName]);
+                delete layerStore[layerName];
+            }
+        } catch (err) {
+            showLayerActionFeedback(buildLayerDeleteErrorMessage(layerName, err.message), 'error');
+        } finally {
+            if (triggerButton) {
+                triggerButton.disabled = false;
+                triggerButton.textContent = originalLabel;
+            }
+        }
     }
 
     function buildDatasets(files) {
@@ -440,19 +643,25 @@ document.addEventListener('DOMContentLoaded', function () {
         return datasets;
     }
 
-    fileInput.addEventListener('change', () => {
-        fileNamesContainer.innerHTML = "";
-        const allFiles = Array.from(fileInput.files);
+    function getAllowedUploadFiles(fileInputEl) {
+        return Array.from(fileInputEl ? fileInputEl.files : []).filter((file) => ALLOWED_EXTS.has(getExt(file.name)));
+    }
+
+    function renderDatasetInputs(fileInputEl, containerEl) {
+        if (!containerEl) return [];
+
+        containerEl.innerHTML = "";
+        const allFiles = Array.from(fileInputEl ? fileInputEl.files : []);
         const files = allFiles.filter((file) => ALLOWED_EXTS.has(getExt(file.name)));
         const ignoredCount = allFiles.length - files.length;
-        uploadDatasets = buildDatasets(files);
+        const datasets = buildDatasets(files);
 
-        if (!uploadDatasets.length) {
-            fileNamesContainer.innerHTML = "<em>Aucun fichier GPKG ou shapefile détecté.</em>";
-            return;
+        if (!datasets.length) {
+            containerEl.innerHTML = "<em>Aucun fichier GPKG ou shapefile détecté.</em>";
+            return [];
         }
 
-        uploadDatasets.forEach((ds) => {
+        datasets.forEach((ds) => {
             const div = document.createElement('div');
             const extsInfo = ds.type === 'shp'
                 ? `Extensions: ${ds.exts.join(', ')}`
@@ -467,7 +676,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 <div style="color:#666; font-size:0.85em;">Laisser vide pour utiliser le nom du fichier.</div>
                 ${missingInfo}
             `;
-            fileNamesContainer.appendChild(div);
+            containerEl.appendChild(div);
         });
 
         if (ignoredCount > 0) {
@@ -475,71 +684,146 @@ document.addEventListener('DOMContentLoaded', function () {
             note.style.color = '#666';
             note.style.fontSize = '0.9em';
             note.textContent = `${ignoredCount} fichier(s) ignoré(s) (format non supporté).`;
-            fileNamesContainer.appendChild(note);
-        }
-    });
-
-    uploadBtn.addEventListener('click', () => {
-        const files = Array.from(fileInput.files).filter((file) => ALLOWED_EXTS.has(getExt(file.name)));
-        if (importFeedback) importFeedback.classList.add('hidden-element');
-        if (!files.length) return alert("Veuillez sélectionner des fichiers GPKG ou Shapefile.");
-
-        const missingRequired = uploadDatasets
-            .filter((ds) => ds.type === 'shp' && ds.missing.length)
-            .map((ds) => `${ds.label} (${ds.missing.join(', ')})`);
-        if (missingRequired.length) {
-            alert("Shapefile incomplet : " + missingRequired.join(' | '));
-            return;
+            containerEl.appendChild(note);
         }
 
-        const inputMap = new Map();
-        fileNamesContainer.querySelectorAll('input[data-key]').forEach((input) => {
-            inputMap.set(input.dataset.key, (input.value || '').trim());
-        });
+        return datasets;
+    }
 
+    function collectDatasetNames(containerEl) {
         const names = {};
-        uploadDatasets.forEach((ds) => {
-            const value = inputMap.get(ds.key) || '';
+        if (!containerEl) return names;
+
+        containerEl.querySelectorAll('input[data-key]').forEach((input) => {
+            const value = (input.value || '').trim();
             if (value) {
-                names[ds.key] = value;
+                names[input.dataset.key] = value;
             }
         });
 
-        const formData = new FormData();
-        Array.from(files).forEach((file) => {
-            formData.append('files', file);
+        return names;
+    }
+
+    if (fileInput) {
+        fileInput.addEventListener('change', () => {
+            uploadDatasets = renderDatasetInputs(fileInput, fileNamesContainer);
         });
-        formData.append('names', JSON.stringify(names));
+    }
 
-        // lock UI during upload
-        uploadBtn.disabled = true;
-        const originalLabel = uploadBtn.dataset.label || uploadBtn.textContent;
-        uploadBtn.dataset.label = originalLabel;
-        uploadBtn.textContent = "Import en cours...";
+    if (analysisFileInput) {
+        analysisFileInput.addEventListener('change', () => {
+            analysisUploadDatasets = renderDatasetInputs(analysisFileInput, analysisFileNamesContainer);
+        });
+    }
 
-        fetch('/upload_resilience', { method: 'POST', body: formData })
-            .then(r => r.json())
-            .then(data => {
-                if (data.status === 'ok') {
-                    showImportFeedback(`Importation réussie: ${uploadDatasets.length} couche(s) ajoutée(s).`, 'success');
-                    updateLayerList();
-                    fileInput.value = '';
-                    fileNamesContainer.innerHTML = '';
-                    uploadDatasets = [];
-                } else {
-                    showImportFeedback("Erreur serveur: " + data.message, 'error');
-                    alert("Erreur serveur : " + data.message);
-                }
-            })
-            .catch(err => {
-                showImportFeedback("Erreur réseau: " + err.message, 'error');
-                alert("Erreur réseau : " + err.message);
-            })
-            .finally(() => {
-                uploadBtn.disabled = false;
-                uploadBtn.textContent = uploadBtn.dataset.label || "Importer dans la Base";
+    if (uploadBtn) {
+        uploadBtn.addEventListener('click', () => {
+            const files = getAllowedUploadFiles(fileInput);
+            if (importFeedback) importFeedback.classList.add('hidden-element');
+            if (!files.length) return alert("Veuillez sélectionner des fichiers GPKG ou Shapefile.");
+
+            const missingRequired = uploadDatasets
+                .filter((ds) => ds.type === 'shp' && ds.missing.length)
+                .map((ds) => `${ds.label} (${ds.missing.join(', ')})`);
+            if (missingRequired.length) {
+                alert("Shapefile incomplet : " + missingRequired.join(' | '));
+                return;
+            }
+
+            const formData = new FormData();
+            files.forEach((file) => {
+                formData.append('files', file);
             });
-    });
+            formData.append('names', JSON.stringify(collectDatasetNames(fileNamesContainer)));
+
+            uploadBtn.disabled = true;
+            const originalLabel = uploadBtn.dataset.label || uploadBtn.textContent;
+            uploadBtn.dataset.label = originalLabel;
+            uploadBtn.textContent = "Import en cours...";
+
+            fetch('/upload_resilience', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        const importedCount = Array.isArray(data.imported_layers) && data.imported_layers.length
+                            ? data.imported_layers.length
+                            : uploadDatasets.length;
+                        showImportFeedback(`Importation réussie: ${importedCount} couche(s) aléa ajoutée(s).`, 'success');
+                        updateLayerList();
+                        fileInput.value = '';
+                        fileNamesContainer.innerHTML = '';
+                        uploadDatasets = [];
+                    } else {
+                        showImportFeedback("Erreur serveur: " + data.message, 'error');
+                        alert("Erreur serveur : " + data.message);
+                    }
+                })
+                .catch(err => {
+                    showImportFeedback("Erreur réseau: " + err.message, 'error');
+                    alert("Erreur réseau : " + err.message);
+                })
+                .finally(() => {
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = uploadBtn.dataset.label || "Importer dans la Base";
+                });
+        });
+    }
+
+    if (analysisUploadBtn) {
+        analysisUploadBtn.addEventListener('click', () => {
+            const files = getAllowedUploadFiles(analysisFileInput);
+            if (analysisImportFeedback) analysisImportFeedback.classList.add('hidden-element');
+            if (!files.length) return alert("Veuillez sélectionner votre couche d'analyse (GPKG ou Shapefile).");
+
+            const missingRequired = analysisUploadDatasets
+                .filter((ds) => ds.type === 'shp' && ds.missing.length)
+                .map((ds) => `${ds.label} (${ds.missing.join(', ')})`);
+            if (missingRequired.length) {
+                alert("Shapefile incomplet : " + missingRequired.join(' | '));
+                return;
+            }
+            if (analysisUploadDatasets.length !== 1) {
+                alert("Importez une seule couche principale à la fois pour l'analyse réseau.");
+                return;
+            }
+
+            const formData = new FormData();
+            files.forEach((file) => {
+                formData.append('files', file);
+            });
+            formData.append('names', JSON.stringify(collectDatasetNames(analysisFileNamesContainer)));
+
+            analysisUploadBtn.disabled = true;
+            const originalLabel = analysisUploadBtn.dataset.label || analysisUploadBtn.textContent;
+            analysisUploadBtn.dataset.label = originalLabel;
+            analysisUploadBtn.textContent = "Import en cours...";
+
+            fetch('/upload_resilience_analysis_layer', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        const importedLayers = Array.isArray(data.imported_layers) ? data.imported_layers : [];
+                        const importedCount = importedLayers.length || analysisUploadDatasets.length;
+                        showAnalysisImportFeedback(`Importation réussie: ${importedCount} couche temporaire prête pour l'analyse.`, 'success');
+                        updateLayerList(importedLayers[0] || null);
+                        analysisFileInput.value = '';
+                        analysisFileNamesContainer.innerHTML = '';
+                        analysisUploadDatasets = [];
+                    } else {
+                        showAnalysisImportFeedback("Erreur serveur: " + data.message, 'error');
+                        alert("Erreur serveur : " + data.message);
+                    }
+                })
+                .catch(err => {
+                    showAnalysisImportFeedback("Erreur réseau: " + err.message, 'error');
+                    alert("Erreur réseau : " + err.message);
+                })
+                .finally(() => {
+                    analysisUploadBtn.disabled = false;
+                    analysisUploadBtn.textContent = analysisUploadBtn.dataset.label || "Importer ma couche d'analyse";
+                });
+        });
+    }
 
     if (layerAlea) {
         layerAlea.addEventListener('change', updateAleaSelectedCount);
@@ -793,7 +1077,11 @@ document.addEventListener('DOMContentLoaded', function () {
                             aleaDownloadShp.textContent = "Télécharger Shapefile";
                             aleaDownloadShp.style.display = 'inline';
                         }
-                        updateLayerList();
+                        fetch('/resilience_analysis_layer_clear', { method: 'POST' })
+                            .catch(() => null)
+                            .finally(() => {
+                                updateLayerList();
+                            });
                         loadResilienceHistory();
                         es.close();
                         aleaRunBtn.disabled = false;
@@ -820,7 +1108,12 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // ========== Mise à jour des couches disponibles ========== //
-    function updateLayerList() {
+    function updateLayerList(preferredAnalysisLayer = null) {
+        const previousTableSelection = tableSelector ? tableSelector.value : '';
+        const previousMapSelection = layerSelect ? layerSelect.value : '';
+        const previousAnalysisSelection = preferredAnalysisLayer || (aleaMainLayer ? aleaMainLayer.value : '');
+        const tableOptionValues = new Set();
+
         layerSelect.innerHTML = '';
         tableSelector.innerHTML = '';
         layerControls.innerHTML = '';
@@ -828,40 +1121,52 @@ document.addEventListener('DOMContentLoaded', function () {
         if (aleaMainLayer) aleaMainLayer.innerHTML = '';
         if (aleaSupportList) aleaSupportList.innerHTML = '<em>Chargement des couches de support...</em>';
         if (aleaSupportCount) aleaSupportCount.textContent = '...';
+        if (impactMatrixContainer) impactMatrixContainer.innerHTML = '<em>Chargement de la matrice des impacts...</em>';
 
         layerStore = {};
         mainLayers = [];
         aleaLayers = [];
         syncAleaSelectionMode();
+        loadImpactMatrix();
 
-        // Charger couches principales (gauche)
+        function appendTableOption(value, label = value) {
+            if (!tableSelector || !value || tableOptionValues.has(value)) return;
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = label;
+            tableSelector.appendChild(opt);
+            tableOptionValues.add(value);
+        }
+
+        function restoreSelections() {
+            if (tableSelector && previousTableSelection) {
+                const option = Array.from(tableSelector.options).find((opt) => opt.value === previousTableSelection);
+                if (option) {
+                    tableSelector.value = previousTableSelection;
+                }
+            }
+            if (layerSelect && previousMapSelection) {
+                const option = Array.from(layerSelect.options).find((opt) => opt.value === previousMapSelection);
+                if (option) {
+                    layerSelect.value = previousMapSelection;
+                }
+            }
+        }
+
+        // Charger les couches partagées pour la configuration cartographique.
         fetch('/resilience_layers')
             .then(r => r.json())
             .then(layers => {
                 mainLayers = Array.isArray(layers) ? layers : [];
 
                 mainLayers.forEach(layer => {
-                    // Pour visualisation sur carte
                     const opt = document.createElement('option');
                     opt.value = layer;
                     opt.textContent = layer;
                     layerSelect.appendChild(opt);
 
-                    // Pour table attributaire
-                    const opt2 = document.createElement('option');
-                    opt2.value = layer;
-                    opt2.textContent = layer;
-                    tableSelector.appendChild(opt2);
+                    appendTableOption(layer, layer);
 
-                    // Pour test aléas
-                    if (aleaMainLayer) {
-                        const opt4 = document.createElement('option');
-                        opt4.value = layer;
-                        opt4.textContent = layer;
-                        aleaMainLayer.appendChild(opt4);
-                    }
-
-                    // Gestion affichage/suppression
                     const wrapper = document.createElement('div');
                     wrapper.style.marginBottom = '10px';
                     wrapper.innerHTML = `
@@ -879,9 +1184,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     `;
                     layerControls.appendChild(wrapper);
                 });
+                restoreSelections();
             });
 
-        // Charger couches support (droite)
+        // Charger les couches support (aléas) pour l'injection de stress.
         fetch('/resilience_layers_support')
             .then(r => r.json())
             .then(supportLayers => {
@@ -898,14 +1204,6 @@ document.addEventListener('DOMContentLoaded', function () {
                     });
                 }
 
-                // Pour la table attributaire (lecture seule)
-                aleaLayers.forEach(layer => {
-                    const opt2 = document.createElement('option');
-                    opt2.value = layer;
-                    opt2.textContent = layer + " (support)";
-                    tableSelector.appendChild(opt2);
-                });
-
                 syncAleaSelectionMode();
             })
             .catch(() => {
@@ -913,6 +1211,43 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (aleaSupportList) aleaSupportList.innerHTML = '<em>Erreur lors du chargement des couches support.</em>';
                 if (aleaSupportCount) aleaSupportCount.textContent = 'Erreur';
                 syncAleaSelectionMode();
+            });
+
+        // Charger les couches privées d'analyse pour l'utilisateur courant.
+        fetch('/resilience_analysis_layers')
+            .then(r => r.json())
+            .then(privateLayers => {
+                const analysisLayers = Array.isArray(privateLayers) ? privateLayers : [];
+
+                if (aleaMainLayer) {
+                    if (!analysisLayers.length) {
+                        const placeholder = document.createElement('option');
+                        placeholder.value = '';
+                        placeholder.textContent = 'Importez votre couche réseau temporaire';
+                        aleaMainLayer.appendChild(placeholder);
+                    } else {
+                        analysisLayers.forEach((layer) => {
+                            const opt = document.createElement('option');
+                            opt.value = layer;
+                            opt.textContent = layer;
+                            aleaMainLayer.appendChild(opt);
+                        });
+                        const targetValue = preferredAnalysisLayer || previousAnalysisSelection;
+                        const targetOption = Array.from(aleaMainLayer.options).find((opt) => opt.value === targetValue);
+                        if (targetOption) {
+                            aleaMainLayer.value = targetValue;
+                        }
+                    }
+                }
+                restoreSelections();
+            })
+            .catch(() => {
+                if (aleaMainLayer) {
+                    const placeholder = document.createElement('option');
+                    placeholder.value = '';
+                    placeholder.textContent = 'Erreur chargement couche temporaire';
+                    aleaMainLayer.appendChild(placeholder);
+                }
             });
     }
 
@@ -1018,57 +1353,22 @@ document.addEventListener('DOMContentLoaded', function () {
     layerControls.addEventListener('click', async function (e) {
         const deleteBtn = e.target.closest('.delete-layer-btn');
         if (!deleteBtn) return;
-
-        const layer = String(deleteBtn.dataset.layer || '').trim();
-        if (!layer) return;
-
-        let dependencyDetails = null;
-        try {
-            const dependencyResponse = await fetch(`/resilience_dependencies/${encodeURIComponent(layer)}`);
-            const dependencyPayload = await dependencyResponse.json().catch(() => ({}));
-            if (!dependencyResponse.ok || dependencyPayload.status === 'error') {
-                throw new Error(dependencyPayload.message || `HTTP ${dependencyResponse.status}`);
-            }
-            dependencyDetails = dependencyPayload;
-        } catch (err) {
-            const fallbackMessage = buildLayerDeleteFallbackMessage(layer, err.message);
-            if (!confirm(fallbackMessage)) {
-                return;
-            }
-        }
-
-        if (dependencyDetails && !confirm(buildLayerDeleteConfirmMessage(layer, dependencyDetails))) {
-            return;
-        }
-
-        deleteBtn.disabled = true;
-        const originalLabel = deleteBtn.textContent;
-        deleteBtn.textContent = 'Suppression...';
-
-        try {
-            const response = await fetch('/delete_resilience_layer', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ layer })
-            });
-            const result = await response.json().catch(() => ({}));
-            if (!response.ok || result.status !== 'ok') {
-                throw new Error(result.message || `HTTP ${response.status}`);
-            }
-
-            showLayerActionFeedback(buildLayerDeleteSuccessMessage(result, layer), 'success');
-            updateLayerList();
-            if (layerStore[layer]) {
-                map.removeLayer(layerStore[layer]);
-                delete layerStore[layer];
-            }
-        } catch (err) {
-            showLayerActionFeedback(buildLayerDeleteErrorMessage(layer, err.message), 'error');
-        } finally {
-            deleteBtn.disabled = false;
-            deleteBtn.textContent = originalLabel;
-        }
+        await deleteResilienceLayer(deleteBtn.dataset.layer, deleteBtn);
     });
+
+    if (impactMatrixContainer) {
+        impactMatrixContainer.addEventListener('click', async function (e) {
+            const deleteBtn = e.target.closest('.impact-matrix-delete[data-layer]');
+            if (!deleteBtn) return;
+            await deleteResilienceLayer(deleteBtn.dataset.layer, deleteBtn);
+        });
+    }
+
+    if (impactMatrixSaveBtn) {
+        impactMatrixSaveBtn.addEventListener('click', () => {
+            saveImpactMatrix();
+        });
+    }
 
     updateHistorySelectionUi();
     updateLayerList(); // démarrage

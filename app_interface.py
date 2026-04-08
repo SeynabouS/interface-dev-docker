@@ -6,8 +6,12 @@ from app import app as app
 RESILIENCE_EXACT_PATHS = {
     "/resilience",
     "/upload_resilience",
+    "/upload_resilience_analysis_layer",
     "/resilience_layers",
     "/resilience_layers_support",
+    "/resilience_impact_matrix",
+    "/resilience_analysis_layers",
+    "/resilience_analysis_layer_clear",
     "/resilience_runs_history",
     "/resilience_runs_delete",
     "/resilience_runs_reset",

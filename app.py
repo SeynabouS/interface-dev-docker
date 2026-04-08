@@ -10,6 +10,7 @@ import urllib.parse
 from sqlalchemy import create_engine
 import json
 import logging
+import hashlib
 from dbfread import DBF
 import base64
 import csv
@@ -48,6 +49,9 @@ from sqlalchemy import create_engine, text
 app = Flask(__name__)
 
 SIDE_CAR_EXTS = {'.dbf', '.shx', '.prj', '.cpg', '.sbn', '.sbx'}
+RESILIENCE_ANALYSIS_SESSION_KEY = "resilience_analysis_upload"
+RESILIENCE_ANALYSIS_STAGE_DIRNAME = "resilience_analysis_stage"
+RESILIENCE_IMPACT_LEVELS = (0, 1, 2, 3)
 
 # --- Options app ---
 app.config['RESET_LINK_VIA_UI'] = os.getenv('RESET_LINK_VIA_UI', '0') == '1'
@@ -181,9 +185,85 @@ def login():
 # Route de déconnexion
 @app.route('/logout')
 def logout():
+    _pop_session_resilience_analysis_upload(clear_files=True)
     session.pop('user_id', None)
     flash("Déconnexion réussie.", "success")
     return redirect(url_for('login'))
+
+
+def _current_user_id() -> int | None:
+    raw_user_id = session.get("user_id")
+    try:
+        user_id = int(raw_user_id)
+    except (TypeError, ValueError):
+        return None
+    return user_id if user_id > 0 else None
+
+
+def _normalize_alea_layer_name(name: str) -> str:
+    normalized = re.sub(r'[^A-Za-z0-9_]+', '_', str(name or '').strip()).strip('_').lower()
+    if not normalized:
+        raise ValueError("Nom de couche aléa invalide.")
+    if not normalized.startswith("alea_"):
+        normalized = f"alea_{normalized}"
+    return normalized[:63]
+
+
+def _resilience_analysis_stage_root() -> str:
+    root = os.path.join(tempfile.gettempdir(), RESILIENCE_ANALYSIS_STAGE_DIRNAME)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _clear_resilience_analysis_upload_files(upload: dict | None):
+    if not isinstance(upload, dict):
+        return
+    staging_dir = str(upload.get("staging_dir") or "").strip()
+    if staging_dir and os.path.isdir(staging_dir):
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _pop_session_resilience_analysis_upload(clear_files: bool = True):
+    upload = session.pop(RESILIENCE_ANALYSIS_SESSION_KEY, None)
+    if clear_files:
+        _clear_resilience_analysis_upload_files(upload)
+    session.modified = True
+    return upload
+
+
+def _sanitize_session_resilience_analysis_upload(raw_upload) -> dict | None:
+    if not isinstance(raw_upload, dict):
+        return None
+    display_name = str(raw_upload.get("display_name") or "").strip()
+    dataset_path = str(raw_upload.get("dataset_path") or "").strip()
+    staging_dir = str(raw_upload.get("staging_dir") or "").strip()
+    if not display_name or not dataset_path or not staging_dir:
+        return None
+    return {
+        "display_name": display_name,
+        "dataset_path": dataset_path,
+        "staging_dir": staging_dir,
+    }
+
+
+def _get_session_resilience_analysis_upload() -> dict | None:
+    upload = _sanitize_session_resilience_analysis_upload(session.get(RESILIENCE_ANALYSIS_SESSION_KEY))
+    if not upload:
+        return None
+    if not os.path.exists(upload["dataset_path"]):
+        _pop_session_resilience_analysis_upload(clear_files=True)
+        return None
+    return upload
+
+
+def _set_session_resilience_analysis_upload(display_name: str, dataset_path: str, staging_dir: str):
+    _pop_session_resilience_analysis_upload(clear_files=True)
+    session[RESILIENCE_ANALYSIS_SESSION_KEY] = {
+        "display_name": str(display_name or "").strip(),
+        "dataset_path": str(dataset_path or "").strip(),
+        "staging_dir": str(staging_dir or "").strip(),
+    }
+    session.modified = True
 
 @app.route('/forgot', methods=['GET', 'POST'])
 def forgot_password():
@@ -5453,6 +5533,11 @@ def resilience():
 
 @app.route('/upload_resilience', methods=['POST'])
 def upload_resilience():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    _ensure_resilience_run_history_table()
     files = request.files.getlist('files')
     names = {}
     legacy_names = []
@@ -5539,6 +5624,8 @@ def upload_resilience():
         if not datasets:
             return jsonify({'status': 'error', 'message': 'Aucun fichier GPKG ou shapefile détecté.'})
 
+        target_names = set()
+        imported_layers = []
         for ds in datasets:
             name = (names.get(ds["key"]) or names.get(ds["default_name"]) or "")
             if not name and legacy_names:
@@ -5548,32 +5635,177 @@ def upload_resilience():
                 # Fallback: si aucun nom saisi, on prend le nom du fichier/couche.
                 name = ds["default_name"]
             try:
-                import_meta = _import_vector_dataset_to_postgis(ds["path"], name, schema="resilience")
+                alea_name = _normalize_alea_layer_name(name)
+            except ValueError as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 400
+            if alea_name in target_names:
+                return jsonify({'status': 'error', 'message': f'Nom de couche dupliqué dans l’import : {alea_name}'}), 400
+            target_names.add(alea_name)
+            try:
+                with engine.begin() as conn:
+                    _purge_missing_private_resilience_layers(conn)
+                    _ensure_public_layer_name_available(conn, alea_name)
+                import_meta = _import_vector_dataset_to_postgis(ds["path"], alea_name, schema="resilience")
                 logging.info(
                     "Import résilience %s -> %s via %s (%s lignes, %s géométrie(s) NULL source).",
                     ds["key"],
-                    name,
+                    alea_name,
                     import_meta.get("driver", "unknown"),
                     import_meta.get("source_rows", "?"),
                     import_meta.get("source_null_geometry_count", "?"),
                 )
+                imported_layers.append(alea_name)
             except Exception as e:
                 return jsonify({'status': 'error', 'message': f'Erreur traitement {os.path.basename(ds["path"])} : {str(e)}'})
 
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "imported_layers": imported_layers})
+
+
+@app.route('/upload_resilience_analysis_layer', methods=['POST'])
+def upload_resilience_analysis_layer():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    files = request.files.getlist('files')
+    names = {}
+    legacy_names = []
+    names_raw = request.form.get('names')
+    if names_raw:
+        try:
+            names = json.loads(names_raw)
+            if not isinstance(names, dict):
+                return jsonify({'status': 'error', 'message': 'Format de noms invalide (attendu: objet JSON).'}), 400
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': f'Noms invalides : {str(e)}'}), 400
+    else:
+        legacy_items = [(k, request.form[k]) for k in request.form if k.startswith('name-')]
+        legacy_items.sort(key=lambda kv: int(kv[0].split('-')[1]) if kv[0].split('-')[1].isdigit() else 0)
+        legacy_names = [v for _, v in legacy_items if v]
+
+    shp_exts = {'.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx'}
+    shp_required = {'.shp', '.shx', '.dbf'}
+    stage_dir = None
+    try:
+        stage_dir = tempfile.mkdtemp(
+            prefix=f"resilience_analysis_u{current_user_id}_",
+            dir=_resilience_analysis_stage_root(),
+        )
+
+        saved_files = []
+        seen_names = set()
+        for file in files:
+            orig_name = os.path.basename(file.filename or "")
+            if not orig_name:
+                continue
+            safe_name = secure_filename(orig_name)
+            if not safe_name:
+                continue
+            if safe_name in seen_names:
+                return jsonify({'status': 'error', 'message': f'Fichier en double : {orig_name}'}), 400
+            seen_names.add(safe_name)
+            filepath = os.path.join(stage_dir, safe_name)
+            file.save(filepath)
+            saved_files.append(filepath)
+
+        if not saved_files:
+            return jsonify({'status': 'error', 'message': 'Aucun fichier reçu.'}), 400
+
+        stems = {}
+        gpkg_files = []
+        for path in saved_files:
+            fname = os.path.basename(path)
+            stem, ext = os.path.splitext(fname)
+            ext = ext.lower()
+            if ext == '.gpkg':
+                gpkg_files.append(path)
+                continue
+            if ext in shp_exts:
+                stems.setdefault(stem, set()).add(ext)
+
+        shapefile_stems = [stem for stem, exts in stems.items() if '.shp' in exts]
+        missing_required = {
+            stem: sorted(shp_required - exts)
+            for stem, exts in stems.items()
+            if '.shp' in exts and not shp_required.issubset(exts)
+        }
+        if missing_required:
+            details = "; ".join([f"{stem}: manque {', '.join(m)}" for stem, m in missing_required.items()])
+            return jsonify({'status': 'error', 'message': f'Shapefile incomplet ({details})'}), 400
+
+        datasets = []
+        for stem in sorted(shapefile_stems):
+            shp_path = os.path.join(stage_dir, f"{stem}.shp")
+            if not os.path.exists(shp_path):
+                continue
+            datasets.append({
+                "path": shp_path,
+                "key": f"{stem}.shp",
+                "default_name": stem,
+            })
+
+        for path in sorted(gpkg_files):
+            base = os.path.basename(path)
+            datasets.append({
+                "path": path,
+                "key": base,
+                "default_name": os.path.splitext(base)[0],
+            })
+
+        if not datasets:
+            return jsonify({'status': 'error', 'message': 'Aucun fichier GPKG ou shapefile détecté.'}), 400
+        if len(datasets) != 1:
+            return jsonify({
+                'status': 'error',
+                'message': "Importez une seule couche principale à la fois pour l'analyse réseau."
+            }), 400
+
+        ds = datasets[0]
+        name = (names.get(ds["key"]) or names.get(ds["default_name"]) or "")
+        if not name and legacy_names:
+            name = legacy_names.pop(0)
+        display_name = (name or ds["default_name"] or "").strip()
+        if not display_name:
+            return jsonify({'status': 'error', 'message': "Nom de couche d'analyse invalide."}), 400
+
+        _set_session_resilience_analysis_upload(display_name, ds["path"], stage_dir)
+        stage_dir = None
+        logging.info(
+            "Couche d'analyse temporaire chargée pour user=%s : %s (%s).",
+            current_user_id,
+            display_name,
+            ds["path"],
+        )
+        return jsonify({"status": "ok", "imported_layers": [display_name]})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Erreur import analyse : {str(e)}'}), 500
+    finally:
+        if stage_dir and os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 # Route pour lister les couches dans le schéma resilience
 @app.route('/resilience_layers')
 def get_resilience_layers():
-    with engine.connect() as conn:
-        # Tables et vues (hors préfixe alea)
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    _ensure_resilience_run_history_table()
+    with engine.begin() as conn:
+        _purge_missing_private_resilience_layers(conn)
+        private_rows = conn.execute(text("""
+            SELECT layer_name, display_name, owner_user_id
+            FROM resilience.private_run_layers
+        """)).mappings().all()
+        private_by_layer = {row["layer_name"]: row for row in private_rows}
+
+        # Tables et vues partagées, y compris les couches aléa.
         result1 = conn.execute(text("""
             SELECT table_name 
             FROM information_schema.tables
             WHERE table_schema = 'resilience'
               AND table_type IN ('BASE TABLE', 'VIEW')
-              AND table_name NOT LIKE 'alea%'
               AND table_name <> 'users'
               AND EXISTS (
                   SELECT 1
@@ -5594,21 +5826,36 @@ def get_resilience_layers():
         """))
         matviews = [row[0] for row in result2 if _has_column(conn, 'resilience', row[0], 'geometry')]
 
-    all_layers = sorted(set(tables + matviews))
-    return jsonify(all_layers)
+    shared_layers = []
+    for layer in sorted(set(tables + matviews)):
+        if layer in private_by_layer:
+            continue
+        shared_layers.append(layer)
+
+    return jsonify(sorted(set(shared_layers)))
 
 
-# Route pour charger une couche spécifique renvoie seulement les couches principales (sans préfixe alea)
+# Route pour charger une couche spécifique partagée ou privée autorisée pour l'utilisateur courant.
 @app.route('/resilience_layer_data/<layer_name>')
 def get_resilience_layer_data(layer_name):
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
     try:
+        _ensure_resilience_run_history_table()
         with engine.begin() as conn:
-            if not _object_exists('resilience', layer_name):
+            _purge_missing_private_resilience_layers(conn)
+            resolved_layer = _resolve_resilience_layer_for_user(conn, layer_name, current_user_id)
+            if not resolved_layer or not resolved_layer["allowed"]:
                 return jsonify({'status': 'error', 'message': f'Couche {layer_name} introuvable.'}), 404
-            if not _has_column(conn, 'resilience', layer_name, 'geometry'):
+            db_layer_name = resolved_layer["layer_name"]
+            if not _object_exists('resilience', db_layer_name):
+                return jsonify({'status': 'error', 'message': f'Couche {layer_name} introuvable.'}), 404
+            if not _has_column(conn, 'resilience', db_layer_name, 'geometry'):
                 return jsonify({'status': 'error', 'message': f"{layer_name} n'est pas une couche cartographique."}), 400
 
-            q_layer = _quote_ident(layer_name)
+            q_layer = _quote_ident(db_layer_name)
             gdf = gpd.read_postgis(f'SELECT * FROM "resilience".{q_layer}', con=conn, geom_col='geometry')
             gdf = gdf.to_crs(epsg=4326)
         
@@ -5634,40 +5881,111 @@ def get_resilience_layer_data(layer_name):
 @app.route('/resilience_layers_support')
 def get_resilience_layers_support():
     with engine.begin() as conn:
-        result = conn.execute(text("""
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema = 'resilience'
-              AND table_type IN ('BASE TABLE', 'VIEW')
-              AND table_name LIKE 'alea%'
-              AND EXISTS (
-                  SELECT 1
-                  FROM information_schema.columns c
-                  WHERE c.table_schema = 'resilience'
-                    AND c.table_name = information_schema.tables.table_name
-                    AND c.column_name = 'geometry'
-              );
-        """))
-        alea_tables = [row[0] for row in result]
+        alea_tables = _list_resilience_support_layers(conn)
     return jsonify(sorted(alea_tables))
+
+
+@app.route('/resilience_impact_matrix')
+def get_resilience_impact_matrix():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    _ensure_resilience_run_history_table()
+    with engine.begin() as conn:
+        support_layers = _ensure_resilience_impact_matrix_defaults(conn)
+        matrix = _get_resilience_impact_matrix_map(conn, support_layers)
+
+    payload = {
+        "levels": list(RESILIENCE_IMPACT_LEVELS),
+        "layers": [
+            {
+                "layer_name": layer_name,
+                "values": {str(level): matrix.get(layer_name, {}).get(level, 0.0) for level in RESILIENCE_IMPACT_LEVELS},
+            }
+            for layer_name in support_layers
+        ],
+    }
+    return jsonify(payload)
+
+
+@app.route('/resilience_impact_matrix', methods=['POST'])
+def save_resilience_impact_matrix():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    _ensure_resilience_run_history_table()
+    data = request.get_json(silent=True) or {}
+    values = data.get("values")
+
+    try:
+        with engine.begin() as conn:
+            _save_resilience_impact_matrix(conn, values)
+        return jsonify({"status": "ok"})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logging.exception("Sauvegarde de la matrice d'impacts impossible.")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/resilience_analysis_layers')
+def get_resilience_analysis_layers():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    upload = _get_session_resilience_analysis_upload()
+    if not upload:
+        return jsonify([])
+    return jsonify([upload["display_name"]])
+
+
+@app.route('/resilience_analysis_layer_clear', methods=['POST'])
+def clear_resilience_analysis_layer():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    _pop_session_resilience_analysis_upload(clear_files=True)
+    return jsonify({"status": "ok"})
 
 
 #dependance    
 @app.route('/resilience_dependencies/<layer>')
 def resilience_dependencies(layer):
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
+    _ensure_resilience_run_history_table()
     with engine.begin() as conn:
-        layer_type = _get_resilience_object_kind(conn, layer)
+        _purge_missing_private_resilience_layers(conn)
+        resolved_layer = _resolve_resilience_layer_for_user(conn, layer, current_user_id)
+        if not resolved_layer or not resolved_layer["allowed"]:
+            return jsonify({
+                "status": "error",
+                "message": f'Couche "{layer}" introuvable.'
+            }), 404
+
+        db_layer_name = resolved_layer["layer_name"]
+        layer_type = _get_resilience_object_kind(conn, db_layer_name)
         if layer_type is None:
             return jsonify({
                 "status": "error",
                 "message": f'Couche "{layer}" introuvable.'
             }), 404
-        if not _has_column(conn, 'resilience', layer, 'geometry'):
+        if not _has_column(conn, 'resilience', db_layer_name, 'geometry'):
             return jsonify({
                 "status": "error",
                 "message": f'"{layer}" n\'est pas une couche cartographique.'
             }), 400
-        deps = _list_resilience_dependencies(conn, layer)
+        deps = _list_resilience_dependencies(conn, db_layer_name)
+        for dep in deps:
+            resolved_dep = _resolve_resilience_layer_for_user(conn, dep["name"], current_user_id)
+            if resolved_dep and resolved_dep["allowed"]:
+                dep["name"] = resolved_dep["display_name"]
     return jsonify({
         "status": "ok",
         "layer": layer,
@@ -5681,33 +5999,55 @@ def resilience_dependencies(layer):
 # route de suppression d'une couche
 @app.route('/delete_resilience_layer', methods=['POST'])
 def delete_resilience_layer():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
     data = request.json
     layer = (data or {}).get('layer')
     if not layer:
         return jsonify({"status": "error", "message": "Couche manquante."}), 400
 
     try:
+        _ensure_resilience_run_history_table()
         with engine.begin() as conn:
-            layer_type = _get_resilience_object_kind(conn, layer)
+            _purge_missing_private_resilience_layers(conn)
+            resolved_layer = _resolve_resilience_layer_for_user(conn, layer, current_user_id)
+            if not resolved_layer or not resolved_layer["allowed"]:
+                return jsonify({
+                    "status": "error",
+                    "message": f'Couche "{layer}" introuvable.'
+                }), 404
+
+            db_layer_name = resolved_layer["layer_name"]
+            layer_type = _get_resilience_object_kind(conn, db_layer_name)
             if layer_type is None:
                 return jsonify({
                     "status": "error",
                     "message": f'Couche "{layer}" introuvable.'
                 }), 404
-            if not _has_column(conn, 'resilience', layer, 'geometry'):
+            if not _has_column(conn, 'resilience', db_layer_name, 'geometry'):
                 return jsonify({
                     "status": "error",
                     "message": f'"{layer}" n\'est pas une couche cartographique.'
                 }), 400
 
-            deps = _list_resilience_dependencies(conn, layer)
-            q_layer = _quote_ident(layer)
+            deps = _list_resilience_dependencies(conn, db_layer_name)
+            for dep in deps:
+                resolved_dep = _resolve_resilience_layer_for_user(conn, dep["name"], current_user_id)
+                if resolved_dep and resolved_dep["allowed"]:
+                    dep["name"] = resolved_dep["display_name"]
+
+            q_layer = _quote_ident(db_layer_name)
             if layer_type == 'materialized_view':
                 conn.execute(text(f'DROP MATERIALIZED VIEW IF EXISTS "resilience".{q_layer} CASCADE'))
             elif layer_type == 'view':
                 conn.execute(text(f'DROP VIEW IF EXISTS "resilience".{q_layer} CASCADE'))
             else:
                 conn.execute(text(f'DROP TABLE IF EXISTS "resilience".{q_layer} CASCADE'))
+            _delete_resilience_impact_matrix_for_layer(conn, db_layer_name)
+            _unregister_private_run_layer(conn, db_layer_name)
+            _unregister_private_analysis_layer(conn, db_layer_name)
 
         message = f'Couche "{layer}" supprimee de la base Resilience.'
         if deps:
@@ -5729,45 +6069,59 @@ def delete_resilience_layer():
 # route de téléchargement d'une couche
 @app.route('/download_resilience_layer/<layer>')
 def download_resilience_layer(layer):
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
     format = request.args.get('format', 'csv')
     try:
-        if not _object_exists('resilience', layer):
-            return jsonify({'status': 'error', 'message': f'Couche {layer} introuvable.'}), 404
-        q_layer = _quote_ident(layer)
-        gdf = gpd.read_postgis(f'SELECT * FROM "resilience".{q_layer}', con=engine, geom_col='geometry')
-        gdf = gdf.to_crs(epsg=4326)
+        _ensure_resilience_run_history_table()
+        with engine.begin() as conn:
+            _purge_missing_private_resilience_layers(conn)
+            resolved_layer = _resolve_resilience_layer_for_user(conn, layer, current_user_id)
+            if not resolved_layer or not resolved_layer["allowed"]:
+                return jsonify({'status': 'error', 'message': f'Couche {layer} introuvable.'}), 404
+
+            db_layer_name = resolved_layer["layer_name"]
+            download_layer_name = resolved_layer["display_name"] or layer
+            if not _object_exists('resilience', db_layer_name):
+                return jsonify({'status': 'error', 'message': f'Couche {layer} introuvable.'}), 404
+
+            q_layer = _quote_ident(db_layer_name)
+            gdf = gpd.read_postgis(f'SELECT * FROM "resilience".{q_layer}', con=conn, geom_col='geometry')
+            gdf = gdf.to_crs(epsg=4326)
         df = gdf.drop(columns='geometry')
 
         tmp = tempfile.TemporaryDirectory()
 
         if format == 'csv':
-            path = os.path.join(tmp.name, f"{layer}.csv")
+            path = os.path.join(tmp.name, f"{download_layer_name}.csv")
             df.to_csv(path, index=False, sep=';', encoding='utf-8')
-            return send_file(path, as_attachment=True, download_name=f"{layer}.csv")
+            return send_file(path, as_attachment=True, download_name=f"{download_layer_name}.csv")
 
         elif format == 'html':
-            path = os.path.join(tmp.name, f"{layer}.html")
+            path = os.path.join(tmp.name, f"{download_layer_name}.html")
             df.to_html(path, index=False)
-            return send_file(path, as_attachment=True, download_name=f"{layer}.html")
+            return send_file(path, as_attachment=True, download_name=f"{download_layer_name}.html")
 
         elif format == 'gpkg':
-            path = os.path.join(tmp.name, f"{layer}.gpkg")
+            path = os.path.join(tmp.name, f"{download_layer_name}.gpkg")
             gdf.to_file(path, driver="GPKG")
-            return send_file(path, as_attachment=True, download_name=f"{layer}.gpkg")
+            return send_file(path, as_attachment=True, download_name=f"{download_layer_name}.gpkg")
 
         elif format == 'shp':
             # écrire un shapefile dans un dossier temporaire puis zipper
-            shp_path = os.path.join(tmp.name, f"{layer}.shp")
+            shp_path = os.path.join(tmp.name, f"{download_layer_name}.shp")
             gdf.to_file(shp_path, driver="ESRI Shapefile")
-            zip_path = os.path.join(tmp.name, f"{layer}_shp.zip")
+            zip_path = os.path.join(tmp.name, f"{download_layer_name}_shp.zip")
             shp_exts = {'.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx'}
             with ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for fname in os.listdir(tmp.name):
                     ext = os.path.splitext(fname)[1].lower()
-                    if fname.startswith(layer + '.') and ext in shp_exts:
+                    if fname.startswith(download_layer_name + '.') and ext in shp_exts:
                         full = os.path.join(tmp.name, fname)
                         zf.write(full, arcname=fname)
-            return send_file(zip_path, as_attachment=True, download_name=f"{layer}.zip")
+            return send_file(zip_path, as_attachment=True, download_name=f"{download_layer_name}.zip")
 
         else:
             return jsonify({'status': 'error', 'message': 'Format non supporté'}), 400
@@ -6126,15 +6480,17 @@ def _pick_pk_column(conn, schema: str, table: str) -> str | None:
 
 def _ensure_resilience_run_history_table():
     """
-    Crée la table d'historique des runs résilience si elle n'existe pas.
+    Crée les tables de persistance des runs résilience si elles n'existent pas.
     """
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS resilience.run_history (
                 run_id BIGSERIAL PRIMARY KEY,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                owner_user_id INTEGER,
                 main_layer TEXT NOT NULL,
                 view_name TEXT NOT NULL,
+                layer_name TEXT,
                 stress_layers TEXT NOT NULL,
                 status TEXT NOT NULL,
                 duration_seconds DOUBLE PRECISION,
@@ -6142,12 +6498,551 @@ def _ensure_resilience_run_history_table():
             )
         """))
         conn.execute(text("""
+            ALTER TABLE resilience.run_history
+            ADD COLUMN IF NOT EXISTS owner_user_id INTEGER
+        """))
+        conn.execute(text("""
+            ALTER TABLE resilience.run_history
+            ADD COLUMN IF NOT EXISTS layer_name TEXT
+        """))
+        conn.execute(text("""
             CREATE INDEX IF NOT EXISTS run_history_created_at_idx
             ON resilience.run_history (created_at DESC)
         """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS run_history_owner_user_id_idx
+            ON resilience.run_history (owner_user_id, created_at DESC)
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS resilience.private_run_layers (
+                layer_name TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS private_run_layers_owner_idx
+            ON resilience.private_run_layers (owner_user_id, created_at DESC)
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS private_run_layers_owner_display_uidx
+            ON resilience.private_run_layers (owner_user_id, display_name)
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS resilience.private_analysis_layers (
+                layer_name TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS private_analysis_layers_owner_idx
+            ON resilience.private_analysis_layers (owner_user_id, created_at DESC)
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS private_analysis_layers_owner_display_uidx
+            ON resilience.private_analysis_layers (owner_user_id, display_name)
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS resilience.impact_matrix (
+                layer_name TEXT NOT NULL,
+                alea_level SMALLINT NOT NULL,
+                impact_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (layer_name, alea_level)
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS impact_matrix_layer_idx
+            ON resilience.impact_matrix (layer_name)
+        """))
+        legacy_analysis_layers = [
+            str(row[0]).strip()
+            for row in conn.execute(text("""
+                SELECT layer_name
+                FROM resilience.private_analysis_layers
+            """)).all()
+            if row and row[0]
+        ]
+        for layer_name in legacy_analysis_layers:
+            layer_type = _get_resilience_object_kind(conn, layer_name)
+            if layer_type is None:
+                continue
+            q_layer = _quote_ident(layer_name)
+            if layer_type == 'materialized_view':
+                conn.execute(text(f'DROP MATERIALIZED VIEW IF EXISTS "resilience".{q_layer} CASCADE'))
+            elif layer_type == 'view':
+                conn.execute(text(f'DROP VIEW IF EXISTS "resilience".{q_layer} CASCADE'))
+            else:
+                conn.execute(text(f'DROP TABLE IF EXISTS "resilience".{q_layer} CASCADE'))
+        if legacy_analysis_layers:
+            conn.execute(text("DELETE FROM resilience.private_analysis_layers"))
+            logging.info(
+                "Nettoyage des anciennes couches d'analyse persistées: %s objet(s) supprimé(s).",
+                len(legacy_analysis_layers),
+            )
 
 
-def _log_resilience_run(main_layer, view_name, stress_layers, status, duration_seconds=None, message=None):
+def _purge_missing_private_run_layers(conn):
+    conn.execute(text("""
+        DELETE FROM resilience.private_run_layers pr
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM (
+                SELECT table_name AS object_name
+                FROM information_schema.tables
+                WHERE table_schema = 'resilience'
+                UNION
+                SELECT viewname AS object_name
+                FROM pg_views
+                WHERE schemaname = 'resilience'
+                UNION
+                SELECT matviewname AS object_name
+                FROM pg_matviews
+                WHERE schemaname = 'resilience'
+            ) objects
+            WHERE objects.object_name = pr.layer_name
+        )
+    """))
+
+
+def _purge_missing_private_analysis_layers(conn):
+    conn.execute(text("""
+        DELETE FROM resilience.private_analysis_layers pr
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM (
+                SELECT table_name AS object_name
+                FROM information_schema.tables
+                WHERE table_schema = 'resilience'
+                UNION
+                SELECT viewname AS object_name
+                FROM pg_views
+                WHERE schemaname = 'resilience'
+                UNION
+                SELECT matviewname AS object_name
+                FROM pg_matviews
+                WHERE schemaname = 'resilience'
+            ) objects
+            WHERE objects.object_name = pr.layer_name
+        )
+    """))
+
+
+def _purge_missing_private_resilience_layers(conn):
+    _purge_missing_private_run_layers(conn)
+    _purge_missing_private_analysis_layers(conn)
+
+
+def _list_resilience_support_layers(conn) -> list[str]:
+    result = conn.execute(text("""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'resilience'
+          AND table_type IN ('BASE TABLE', 'VIEW')
+          AND table_name LIKE 'alea%'
+          AND EXISTS (
+              SELECT 1
+              FROM information_schema.columns c
+              WHERE c.table_schema = 'resilience'
+                AND c.table_name = information_schema.tables.table_name
+                AND c.column_name = 'geometry'
+          )
+        ORDER BY table_name
+    """))
+    layers = [row[0] for row in result if row and row[0]]
+
+    matviews = [
+        row[0]
+        for row in conn.execute(text("""
+            SELECT matviewname
+            FROM pg_matviews
+            WHERE schemaname = 'resilience'
+              AND matviewname LIKE 'alea%'
+            ORDER BY matviewname
+        """))
+        if row and row[0] and _has_column(conn, 'resilience', row[0], 'geometry')
+    ]
+
+    return sorted(set(layers + matviews))
+
+
+def _delete_resilience_impact_matrix_for_layer(conn, layer_name: str):
+    conn.execute(text("""
+        DELETE FROM resilience.impact_matrix
+        WHERE layer_name = :layer_name
+    """), {"layer_name": layer_name})
+
+
+def _ensure_resilience_impact_matrix_defaults(conn) -> list[str]:
+    support_layers = _list_resilience_support_layers(conn)
+    support_set = set(support_layers)
+
+    existing_layers = {
+        str(row[0]).strip()
+        for row in conn.execute(text("""
+            SELECT DISTINCT layer_name
+            FROM resilience.impact_matrix
+        """)).all()
+        if row and row[0]
+    }
+
+    for stale_layer in sorted(existing_layers - support_set):
+        _delete_resilience_impact_matrix_for_layer(conn, stale_layer)
+
+    for layer_name in support_layers:
+        for alea_level in RESILIENCE_IMPACT_LEVELS:
+            conn.execute(text("""
+                INSERT INTO resilience.impact_matrix (layer_name, alea_level, impact_value)
+                VALUES (:layer_name, :alea_level, 0)
+                ON CONFLICT (layer_name, alea_level) DO NOTHING
+            """), {
+                "layer_name": layer_name,
+                "alea_level": alea_level,
+            })
+
+    return support_layers
+
+
+def _normalize_resilience_impact_value(raw_value) -> float:
+    if raw_value is None:
+        return 0.0
+    if isinstance(raw_value, (int, float, np.integer, np.floating)):
+        value = float(raw_value)
+        if not np.isfinite(value):
+            raise ValueError("Valeur d'impact invalide.")
+        return value
+
+    text_value = str(raw_value).strip().replace(",", ".")
+    if not text_value:
+        return 0.0
+
+    value = float(text_value)
+    if not np.isfinite(value):
+        raise ValueError("Valeur d'impact invalide.")
+    return value
+
+
+def _get_resilience_impact_matrix_map(conn, layer_names: list[str] | None = None) -> dict[str, dict[int, float]]:
+    support_layers = _ensure_resilience_impact_matrix_defaults(conn)
+    target_layers = [layer for layer in (layer_names or support_layers) if layer]
+    matrix = {
+        layer_name: {level: 0.0 for level in RESILIENCE_IMPACT_LEVELS}
+        for layer_name in target_layers
+    }
+    if not matrix:
+        return matrix
+
+    rows = conn.execute(text("""
+        SELECT layer_name, alea_level, impact_value
+        FROM resilience.impact_matrix
+        ORDER BY layer_name, alea_level
+    """)).mappings().all()
+
+    for row in rows:
+        layer_name = str(row["layer_name"] or "").strip()
+        alea_level = int(row["alea_level"])
+        if layer_name not in matrix or alea_level not in RESILIENCE_IMPACT_LEVELS:
+            continue
+        matrix[layer_name][alea_level] = float(row["impact_value"] or 0.0)
+
+    return matrix
+
+
+def _save_resilience_impact_matrix(conn, values: dict):
+    if not isinstance(values, dict):
+        raise ValueError("Format de matrice invalide.")
+
+    support_layers = set(_ensure_resilience_impact_matrix_defaults(conn))
+    for layer_name, raw_levels in values.items():
+        layer_name = str(layer_name or "").strip()
+        if not layer_name:
+            continue
+        if layer_name not in support_layers:
+            raise ValueError(f'La couche "{layer_name}" n\'est pas disponible dans la configuration.')
+        if not isinstance(raw_levels, dict):
+            raise ValueError(f'Valeurs invalides pour la couche "{layer_name}".')
+
+        for alea_level in RESILIENCE_IMPACT_LEVELS:
+            impact_value = _normalize_resilience_impact_value(
+                raw_levels.get(str(alea_level), raw_levels.get(alea_level, 0))
+            )
+            conn.execute(text("""
+                INSERT INTO resilience.impact_matrix (layer_name, alea_level, impact_value, updated_at)
+                VALUES (:layer_name, :alea_level, :impact_value, now())
+                ON CONFLICT (layer_name, alea_level) DO UPDATE
+                SET impact_value = EXCLUDED.impact_value,
+                    updated_at = now()
+            """), {
+                "layer_name": layer_name,
+                "alea_level": alea_level,
+                "impact_value": impact_value,
+            })
+
+
+def _build_resilience_output_columns(alea_tables: list[str]) -> dict[str, dict[str, str]]:
+    mapping: dict[str, dict[str, str]] = {}
+    used_suffixes: set[str] = set()
+    max_suffix_len = 63 - len("impact_")
+
+    for layer_name in alea_tables:
+        raw_suffix = str(layer_name or "").strip()
+        if raw_suffix.startswith("alea_"):
+            raw_suffix = raw_suffix[5:]
+        normalized = re.sub(r'[^A-Za-z0-9_]+', '_', raw_suffix).strip('_').lower() or "layer"
+        suffix = normalized[:max_suffix_len].rstrip('_') or "layer"
+        if suffix in used_suffixes:
+            digest = hashlib.sha1(str(layer_name).encode("utf-8")).hexdigest()[:6]
+            base_len = max(1, max_suffix_len - len(digest) - 1)
+            suffix = f"{normalized[:base_len].rstrip('_') or 'layer'}_{digest}"
+        while suffix in used_suffixes:
+            suffix = f"{suffix[:max(1, max_suffix_len - 2)]}_{len(used_suffixes)}"
+            suffix = suffix[:max_suffix_len].rstrip('_') or "layer"
+
+        used_suffixes.add(suffix)
+        mapping[layer_name] = {
+            "suffix": suffix,
+            "alea_col": f"alea_{suffix}",
+            "impact_col": f"impact_{suffix}",
+        }
+
+    return mapping
+
+
+def _private_run_layer_by_name(conn, layer_name: str):
+    return conn.execute(text("""
+        SELECT layer_name, display_name, owner_user_id, created_at
+        FROM resilience.private_run_layers
+        WHERE layer_name = :layer_name
+        LIMIT 1
+    """), {"layer_name": layer_name}).mappings().first()
+
+
+def _private_run_layer_by_display_name(conn, owner_user_id: int, display_name: str):
+    return conn.execute(text("""
+        SELECT layer_name, display_name, owner_user_id, created_at
+        FROM resilience.private_run_layers
+        WHERE owner_user_id = :owner_user_id
+          AND display_name = :display_name
+        LIMIT 1
+    """), {
+        "owner_user_id": owner_user_id,
+        "display_name": display_name,
+    }).mappings().first()
+
+
+def _private_analysis_layer_by_name(conn, layer_name: str):
+    return conn.execute(text("""
+        SELECT layer_name, display_name, owner_user_id, created_at
+        FROM resilience.private_analysis_layers
+        WHERE layer_name = :layer_name
+        LIMIT 1
+    """), {"layer_name": layer_name}).mappings().first()
+
+
+def _private_analysis_layer_by_display_name(conn, owner_user_id: int, display_name: str):
+    return conn.execute(text("""
+        SELECT layer_name, display_name, owner_user_id, created_at
+        FROM resilience.private_analysis_layers
+        WHERE owner_user_id = :owner_user_id
+          AND display_name = :display_name
+        LIMIT 1
+    """), {
+        "owner_user_id": owner_user_id,
+        "display_name": display_name,
+    }).mappings().first()
+
+
+def _register_private_run_layer(conn, layer_name: str, display_name: str, owner_user_id: int):
+    conn.execute(text("""
+        INSERT INTO resilience.private_run_layers (layer_name, display_name, owner_user_id)
+        VALUES (:layer_name, :display_name, :owner_user_id)
+        ON CONFLICT (layer_name) DO UPDATE
+        SET display_name = EXCLUDED.display_name,
+            owner_user_id = EXCLUDED.owner_user_id
+    """), {
+        "layer_name": layer_name,
+        "display_name": display_name,
+        "owner_user_id": owner_user_id,
+    })
+
+
+def _unregister_private_run_layer(conn, layer_name: str):
+    conn.execute(text("""
+        DELETE FROM resilience.private_run_layers
+        WHERE layer_name = :layer_name
+    """), {"layer_name": layer_name})
+
+
+def _register_private_analysis_layer(conn, layer_name: str, display_name: str, owner_user_id: int):
+    conn.execute(text("""
+        INSERT INTO resilience.private_analysis_layers (layer_name, display_name, owner_user_id)
+        VALUES (:layer_name, :display_name, :owner_user_id)
+        ON CONFLICT (layer_name) DO UPDATE
+        SET display_name = EXCLUDED.display_name,
+            owner_user_id = EXCLUDED.owner_user_id
+    """), {
+        "layer_name": layer_name,
+        "display_name": display_name,
+        "owner_user_id": owner_user_id,
+    })
+
+
+def _unregister_private_analysis_layer(conn, layer_name: str):
+    conn.execute(text("""
+        DELETE FROM resilience.private_analysis_layers
+        WHERE layer_name = :layer_name
+    """), {"layer_name": layer_name})
+
+
+def _make_private_run_layer_name(display_name: str, owner_user_id: int) -> str:
+    normalized = re.sub(r'[^A-Za-z0-9_]+', '_', str(display_name or "")).strip('_').lower() or "run"
+    digest = hashlib.sha1(f"{owner_user_id}:{display_name}".encode("utf-8")).hexdigest()[:12]
+    prefix = f"run_u{owner_user_id}_"
+    max_base_len = max(1, 63 - len(prefix) - len(digest) - 1)
+    base = normalized[:max_base_len].rstrip('_') or "run"
+    return f"{prefix}{base}_{digest}"
+
+
+def _make_private_analysis_layer_name(display_name: str, owner_user_id: int) -> str:
+    normalized = re.sub(r'[^A-Za-z0-9_]+', '_', str(display_name or "")).strip('_').lower() or "analyse"
+    digest = hashlib.sha1(f"analysis:{owner_user_id}:{display_name}".encode("utf-8")).hexdigest()[:12]
+    prefix = f"analysis_u{owner_user_id}_"
+    max_base_len = max(1, 63 - len(prefix) - len(digest) - 1)
+    base = normalized[:max_base_len].rstrip('_') or "analyse"
+    return f"{prefix}{base}_{digest}"
+
+
+def _resolve_resilience_layer_for_user(conn, requested_name: str, owner_user_id: int | None):
+    requested_name = str(requested_name or "").strip()
+    if not requested_name:
+        return None
+
+    if owner_user_id is not None:
+        row = _private_run_layer_by_display_name(conn, owner_user_id, requested_name)
+        if row:
+            if _get_resilience_object_kind(conn, row["layer_name"]) is None:
+                _unregister_private_run_layer(conn, row["layer_name"])
+            else:
+                return {
+                    "requested_name": requested_name,
+                    "layer_name": row["layer_name"],
+                    "display_name": row["display_name"],
+                    "owner_user_id": row["owner_user_id"],
+                    "scope": "private_run",
+                    "allowed": True,
+                }
+
+    row = _private_run_layer_by_name(conn, requested_name)
+    if row:
+        if _get_resilience_object_kind(conn, row["layer_name"]) is None:
+            _unregister_private_run_layer(conn, row["layer_name"])
+        else:
+            allowed = owner_user_id is not None and int(row["owner_user_id"]) == int(owner_user_id)
+            return {
+                "requested_name": requested_name,
+                "layer_name": row["layer_name"],
+                "display_name": row["display_name"],
+                "owner_user_id": row["owner_user_id"],
+                "scope": "private_run",
+                "allowed": allowed,
+            }
+
+    if _get_resilience_object_kind(conn, requested_name) is not None:
+        return {
+            "requested_name": requested_name,
+            "layer_name": requested_name,
+            "display_name": requested_name,
+            "owner_user_id": None,
+            "scope": "public",
+            "allowed": True,
+        }
+
+    return None
+
+
+def _plan_private_run_target(conn, display_name: str, owner_user_id: int):
+    existing = _private_run_layer_by_display_name(conn, owner_user_id, display_name)
+    if existing:
+        return {
+            "layer_name": existing["layer_name"],
+            "display_name": existing["display_name"],
+        }
+
+    # Un nom logique de run ne doit pas masquer une couche publique existante.
+    existing_public = _resolve_resilience_layer_for_user(conn, display_name, owner_user_id=None)
+    if existing_public and existing_public["scope"] == "public":
+        raise ValueError(f'Le nom "{display_name}" est déjà utilisé par une couche partagée.')
+
+    layer_name = _make_private_run_layer_name(display_name, owner_user_id)
+    collision = _resolve_resilience_layer_for_user(conn, layer_name, owner_user_id=None)
+    if collision and collision["scope"] == "public":
+        raise ValueError(f'Le nom interne "{layer_name}" est déjà utilisé. Choisissez un autre nom de run.')
+
+    return {
+        "layer_name": layer_name,
+        "display_name": display_name,
+    }
+
+
+def _plan_private_analysis_target(conn, display_name: str, owner_user_id: int):
+    existing = _private_analysis_layer_by_display_name(conn, owner_user_id, display_name)
+    if existing:
+        return {
+            "layer_name": existing["layer_name"],
+            "display_name": existing["display_name"],
+        }
+
+    existing_run = _private_run_layer_by_display_name(conn, owner_user_id, display_name)
+    if existing_run:
+        raise ValueError(
+            f'Le nom "{display_name}" est déjà utilisé par un résultat de run privé.'
+        )
+
+    existing_public = _resolve_resilience_layer_for_user(conn, display_name, owner_user_id=None)
+    if existing_public and existing_public["scope"] == "public":
+        raise ValueError(f'Le nom "{display_name}" est déjà utilisé par une couche partagée.')
+
+    layer_name = _make_private_analysis_layer_name(display_name, owner_user_id)
+    collision = _resolve_resilience_layer_for_user(conn, layer_name, owner_user_id=None)
+    if collision and collision["scope"] == "public":
+        raise ValueError(
+            f'Le nom interne "{layer_name}" est déjà utilisé. Choisissez un autre nom de couche.'
+        )
+
+    return {
+        "layer_name": layer_name,
+        "display_name": display_name,
+    }
+
+
+def _ensure_public_layer_name_available(conn, display_name: str):
+    collision = conn.execute(text("""
+        SELECT 1
+        FROM resilience.private_run_layers reserved
+        WHERE display_name = :display_name
+           OR layer_name = :display_name
+        LIMIT 1
+    """), {"display_name": display_name}).first()
+    if collision:
+        raise ValueError(
+            f'Le nom "{display_name}" est déjà réservé par une couche privée. '
+            "Utilisez un autre nom pour la couche partagée."
+        )
+
+
+def _log_resilience_run(
+    main_layer,
+    view_name,
+    stress_layers,
+    status,
+    duration_seconds=None,
+    message=None,
+    owner_user_id=None,
+    layer_name=None,
+):
     """
     Enregistre un run résilience (succès/erreur) dans l'historique.
     """
@@ -6158,11 +7053,13 @@ def _log_resilience_run(main_layer, view_name, stress_layers, status, duration_s
         with engine.begin() as conn:
             conn.execute(text("""
                 INSERT INTO resilience.run_history
-                (main_layer, view_name, stress_layers, status, duration_seconds, message)
-                VALUES (:main_layer, :view_name, :stress_layers, :status, :duration_seconds, :message)
+                (owner_user_id, main_layer, view_name, layer_name, stress_layers, status, duration_seconds, message)
+                VALUES (:owner_user_id, :main_layer, :view_name, :layer_name, :stress_layers, :status, :duration_seconds, :message)
             """), {
+                "owner_user_id": owner_user_id,
                 "main_layer": main_layer or "",
                 "view_name": view_name or "",
+                "layer_name": layer_name or None,
                 "stress_layers": stress_text,
                 "status": status or "unknown",
                 "duration_seconds": duration_seconds,
@@ -6177,6 +7074,10 @@ def resilience_runs_history():
     """
     Retourne l'historique des runs de résilience, avec filtre texte optionnel.
     """
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({"status": "error", "message": "Utilisateur non authentifié."}), 401
+
     q = (request.args.get("q") or "").strip()
     limit_raw = request.args.get("limit", "200")
     try:
@@ -6188,11 +7089,13 @@ def resilience_runs_history():
     _ensure_resilience_run_history_table()
     like = f"%{q}%"
 
-    with engine.connect() as conn:
+    with engine.begin() as conn:
+        _purge_missing_private_resilience_layers(conn)
         rows = conn.execute(text("""
-            SELECT run_id, created_at, main_layer, view_name, stress_layers, status, duration_seconds, message
+            SELECT run_id, created_at, main_layer, view_name, COALESCE(layer_name, view_name) AS layer_name, stress_layers, status, duration_seconds, message
             FROM resilience.run_history
-            WHERE (:q = ''
+            WHERE owner_user_id = :owner_user_id
+              AND (:q = ''
                OR run_id::text ILIKE :like
                OR main_layer ILIKE :like
                OR view_name ILIKE :like
@@ -6200,7 +7103,12 @@ def resilience_runs_history():
                OR status ILIKE :like)
             ORDER BY run_id DESC
             LIMIT :limit
-        """), {"q": q, "like": like, "limit": limit}).mappings().all()
+        """), {
+            "owner_user_id": current_user_id,
+            "q": q,
+            "like": like,
+            "limit": limit,
+        }).mappings().all()
 
     payload = []
     for row in rows:
@@ -6221,6 +7129,7 @@ def resilience_runs_history():
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "main_layer": row["main_layer"],
             "view_name": row["view_name"],
+            "layer_name": row["layer_name"],
             "stress_layers": stress_layers,
             "status": row["status"],
             "duration_seconds": row["duration_seconds"],
@@ -6234,6 +7143,10 @@ def resilience_runs_delete():
     """
     Supprime une sélection de runs (par run_id).
     """
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({"status": "error", "message": "Utilisateur non authentifié."}), 401
+
     _ensure_resilience_run_history_table()
     data = request.get_json(silent=True) or {}
     raw_ids = data.get("run_ids")
@@ -6259,8 +7172,12 @@ def resilience_runs_delete():
     try:
         with engine.begin() as conn:
             result = conn.execute(
-                text(f"DELETE FROM resilience.run_history WHERE run_id IN ({placeholders})"),
-                params,
+                text(f"""
+                    DELETE FROM resilience.run_history
+                    WHERE owner_user_id = :owner_user_id
+                      AND run_id IN ({placeholders})
+                """),
+                {"owner_user_id": current_user_id, **params},
             )
         return jsonify({
             "status": "ok",
@@ -6277,11 +7194,18 @@ def resilience_runs_reset():
     """
     Réinitialise entièrement l'historique des runs.
     """
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({"status": "error", "message": "Utilisateur non authentifié."}), 401
+
     _ensure_resilience_run_history_table()
     try:
         with engine.begin() as conn:
-            conn.execute(text("TRUNCATE TABLE resilience.run_history RESTART IDENTITY"))
-        return jsonify({"status": "ok"})
+            result = conn.execute(text("""
+                DELETE FROM resilience.run_history
+                WHERE owner_user_id = :owner_user_id
+            """), {"owner_user_id": current_user_id})
+        return jsonify({"status": "ok", "deleted_count": int(result.rowcount or 0)})
     except Exception as e:
         logging.exception("Réinitialisation de l'historique des runs impossible.")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -6290,6 +7214,10 @@ def resilience_runs_reset():
 # --- SSE : création vue matérialisée aléas avec logs en temps réel ---
 @app.route('/alea_view_batch_stream')
 def alea_view_batch_stream():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
+
     main = request.args.get('main_layer')
     view_name = request.args.get('view_name') or (f"{main}_alea_view" if main else None)
     selected_raw = request.args.get('alea_tables') or ""
@@ -6302,38 +7230,107 @@ def alea_view_batch_stream():
 
     def gen():
         run_started = time.time()
+        planned_target = None
+        analysis_upload = None
+        analysis_input_table = None
+        temp_table = None
         try:
-            all_alea = _list_alea_tables()
-            if not all_alea:
-                _log_resilience_run(main, view_name, [], "error", message="Aucune couche aléa trouvée.")
-                yield f"data: {json.dumps({'status':'error','message':'Aucune couche aléa trouvée.'})}\n\n"
+            _ensure_resilience_run_history_table()
+            analysis_upload = _get_session_resilience_analysis_upload()
+            if not analysis_upload:
+                message = (
+                    "Importez d'abord votre couche réseau temporaire depuis la page Analyse Réseau."
+                )
+                _log_resilience_run(
+                    main,
+                    view_name,
+                    selected_alea,
+                    "error",
+                    message=message,
+                    owner_user_id=current_user_id,
+                )
+                yield f"data: {json.dumps({'status':'error','message': message})}\n\n"
                 return
-            alea_tables = selected_alea if selected_alea else all_alea
-            missing = [a for a in alea_tables if a not in all_alea]
-            if missing:
-                _log_resilience_run(main, view_name, alea_tables, "error", message='Couches aléa introuvables: ' + ', '.join(missing))
-                yield f"data: {json.dumps({'status':'error','message':'Couches aléa introuvables: ' + ', '.join(missing)})}\n\n"
+            if analysis_upload["display_name"] != main:
+                message = (
+                    "La couche principale sélectionnée n'est plus disponible. "
+                    "Rechargez votre couche réseau temporaire avant de relancer l'analyse."
+                )
+                _log_resilience_run(
+                    main,
+                    view_name,
+                    selected_alea,
+                    "error",
+                    message=message,
+                    owner_user_id=current_user_id,
+                )
+                yield f"data: {json.dumps({'status':'error','message': message})}\n\n"
                 return
-
-            temp_table = f"{view_name}__work"
 
             with engine.begin() as conn:
+                _purge_missing_private_resilience_layers(conn)
+
+                planned_target = _plan_private_run_target(conn, view_name, current_user_id)
+                all_alea = _list_resilience_support_layers(conn)
+                if not all_alea:
+                    _log_resilience_run(
+                        main,
+                        view_name,
+                        [],
+                        "error",
+                        message="Aucune couche aléa trouvée.",
+                        owner_user_id=current_user_id,
+                        layer_name=planned_target["layer_name"],
+                    )
+                    yield f"data: {json.dumps({'status':'error','message':'Aucune couche aléa trouvée.'})}\n\n"
+                    return
+
+                alea_tables = selected_alea if selected_alea else all_alea
+                missing = [a for a in alea_tables if a not in all_alea]
+                if missing:
+                    _log_resilience_run(
+                        main,
+                        view_name,
+                        alea_tables,
+                        "error",
+                        message='Couches aléa introuvables: ' + ', '.join(missing),
+                        owner_user_id=current_user_id,
+                        layer_name=planned_target["layer_name"],
+                    )
+                    yield f"data: {json.dumps({'status':'error','message':'Couches aléa introuvables: ' + ', '.join(missing)})}\n\n"
+                    return
+
+                impact_matrix = _get_resilience_impact_matrix_map(conn, alea_tables)
+                output_columns = _build_resilience_output_columns(alea_tables)
+                analysis_input_table = f"analysis_input_u{current_user_id}_{time.time_ns()}"
+                temp_table = f"tmp_run_u{current_user_id}_{time.time_ns()}"
+
                 # Pas de limite SQL pour les couches volumineuses.
                 conn.execute(text("SET LOCAL statement_timeout = 0"))
-                exists = conn.execute(text("""
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema='resilience' AND table_name=:t
-                """), {"t": main}).first()
-                if not exists:
-                    _log_resilience_run(main, view_name, alea_tables, "error", message=f'Couche principale {main} introuvable.')
+                _import_vector_dataset_to_postgis(
+                    analysis_upload["dataset_path"],
+                    analysis_input_table,
+                    schema="resilience",
+                )
+                db_main = analysis_input_table
+                if _get_resilience_object_kind(conn, db_main) is None:
+                    _log_resilience_run(
+                        main,
+                        view_name,
+                        alea_tables,
+                        "error",
+                        message=f'Couche principale {main} introuvable.',
+                        owner_user_id=current_user_id,
+                        layer_name=planned_target["layer_name"],
+                    )
                     yield f"data: {json.dumps({'status':'error','message':f'Couche principale {main} introuvable.'})}\n\n"
                     return
 
-                pk_col = _pick_pk_column(conn, 'resilience', main)
+                pk_col = _pick_pk_column(conn, 'resilience', db_main)
                 key_col = _quote_ident(pk_col) if pk_col else _quote_ident('__rowid')
                 q_temp_table = _quote_ident(temp_table)
-                q_main = _quote_ident(main)
-                q_view = _quote_ident(view_name)
+                q_main = _quote_ident(db_main)
+                q_view = _quote_ident(planned_target["layer_name"])
 
                 if pk_col:
                     conn.execute(text(f'''
@@ -6370,9 +7367,19 @@ def alea_view_batch_stream():
                     val_col = _pick_alea_value_col(conn, alea)
                     q_alea = _quote_ident(alea)
                     q_val_col = _quote_ident(val_col)
+                    output_meta = output_columns[alea]
+                    alea_col = output_meta["alea_col"]
+                    impact_col = output_meta["impact_col"]
+                    q_alea_col = _quote_ident(alea_col)
+                    q_impact_col = _quote_ident(impact_col)
+                    impact_values = impact_matrix.get(alea, {})
                     conn.execute(text(f'''
                         ALTER TABLE "resilience".{q_temp_table}
-                        ADD COLUMN IF NOT EXISTS {q_alea} text
+                        ADD COLUMN IF NOT EXISTS {q_alea_col} INTEGER
+                    '''))
+                    conn.execute(text(f'''
+                        ALTER TABLE "resilience".{q_temp_table}
+                        ADD COLUMN IF NOT EXISTS {q_impact_col} DOUBLE PRECISION DEFAULT 0
                     '''))
                     conn.execute(text(f'''
                         CREATE INDEX IF NOT EXISTS {_quote_ident(f"{alea}_geom_idx")}
@@ -6391,23 +7398,52 @@ def alea_view_batch_stream():
                         agg AS (
                             SELECT
                                 k,
-                                CASE
-                                    WHEN bool_and(raw_val ~ '^-?[0-9]+$')
-                                        THEN MAX(CASE WHEN raw_val ~ '^-?[0-9]+$' THEN raw_val::numeric END)::text
-                                    ELSE string_agg(DISTINCT raw_val, ',')
-                                END AS val
+                                MAX(
+                                    CASE
+                                        WHEN raw_val ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                                            THEN floor(raw_val::numeric)::int
+                                        ELSE NULL
+                                    END
+                                ) AS alea_level
                             FROM intersects
                             WHERE raw_val <> ''
                             GROUP BY k
                         )
                         UPDATE "resilience".{q_temp_table} v
-                        SET {q_alea} = agg.val
+                        SET {q_alea_col} = agg.alea_level
                         FROM agg
                         WHERE v.{key_col} = agg.k;
                     '''))
+                    conn.execute(text(f'''
+                        UPDATE "resilience".{q_temp_table} v
+                        SET {q_impact_col} = CASE
+                            WHEN v.{q_alea_col} = 0 THEN :impact_0
+                            WHEN v.{q_alea_col} = 1 THEN :impact_1
+                            WHEN v.{q_alea_col} = 2 THEN :impact_2
+                            WHEN v.{q_alea_col} = 3 THEN :impact_3
+                            ELSE 0
+                        END
+                    '''), {
+                        "impact_0": float(impact_values.get(0, 0.0)),
+                        "impact_1": float(impact_values.get(1, 0.0)),
+                        "impact_2": float(impact_values.get(2, 0.0)),
+                        "impact_3": float(impact_values.get(3, 0.0)),
+                    })
                     elapsed = round(time.time() - start, 2)
                     payload = {'status': 'progress', 'layer': alea, 'seconds': elapsed, 'step': idx, 'total': total}
                     yield f"data: {json.dumps(payload)}\n\n"
+
+                impact_cols = [output_columns[layer]["impact_col"] for layer in alea_tables]
+                conn.execute(text(f'''
+                    ALTER TABLE "resilience".{q_temp_table}
+                    ADD COLUMN IF NOT EXISTS "somme" DOUBLE PRECISION DEFAULT 0
+                '''))
+                if impact_cols:
+                    somme_expr = " + ".join([f'COALESCE({_quote_ident(col)}, 0)' for col in impact_cols])
+                    conn.execute(text(f'''
+                        UPDATE "resilience".{q_temp_table}
+                        SET "somme" = {somme_expr}
+                    '''))
 
                 # Table finale (pas de MV) + indexes
                 conn.execute(text(f'''
@@ -6416,17 +7452,17 @@ def alea_view_batch_stream():
                     SELECT * FROM "resilience".{q_temp_table};
                 '''))
                 conn.execute(text(f'''
-                    CREATE INDEX IF NOT EXISTS {_quote_ident(f"{view_name}_geom_idx")}
+                    CREATE INDEX IF NOT EXISTS {_quote_ident(f"{planned_target['layer_name']}_geom_idx")}
                     ON "resilience".{q_view} USING GIST(geometry)
                 '''))
                 if pk_col:
                     conn.execute(text(f'''
-                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{view_name}_{pk_col}_idx")}
+                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{planned_target['layer_name']}_{pk_col}_idx")}
                         ON "resilience".{q_view} ({key_col})
                     '''))
                 else:
                     conn.execute(text(f'''
-                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{view_name}__rowid_idx")}
+                        CREATE INDEX IF NOT EXISTS {_quote_ident(f"{planned_target['layer_name']}__rowid_idx")}
                         ON "resilience".{q_view} (__rowid)
                     '''))
                     # Ne pas exposer la colonne technique dans la sortie finale.
@@ -6435,6 +7471,8 @@ def alea_view_batch_stream():
                         DROP COLUMN IF EXISTS "__rowid"
                     '''))
                 conn.execute(text(f'''DROP TABLE IF EXISTS "resilience".{q_temp_table} CASCADE;'''))
+                conn.execute(text(f'''DROP TABLE IF EXISTS "resilience".{_quote_ident(db_main)} CASCADE;'''))
+                _register_private_run_layer(conn, planned_target["layer_name"], view_name, current_user_id)
 
             done = {
                 'status': 'done',
@@ -6444,10 +7482,37 @@ def alea_view_batch_stream():
                 'download_gpkg': f'/download_resilience_layer/{view_name}?format=gpkg',
                 'download_shp': f'/download_resilience_layer/{view_name}?format=shp'
             }
-            _log_resilience_run(main, view_name, alea_tables, "done", round(time.time() - run_started, 2))
+            _log_resilience_run(
+                main,
+                view_name,
+                alea_tables,
+                "done",
+                round(time.time() - run_started, 2),
+                owner_user_id=current_user_id,
+                layer_name=planned_target["layer_name"],
+            )
             yield f"data: {json.dumps(done)}\n\n"
         except Exception as e:
-            _log_resilience_run(main, view_name, selected_alea, "error", round(time.time() - run_started, 2), str(e))
+            for transient_layer in (temp_table, analysis_input_table):
+                if not transient_layer:
+                    continue
+                try:
+                    with engine.begin() as cleanup_conn:
+                        cleanup_conn.execute(text(
+                            f'DROP TABLE IF EXISTS "resilience".{_quote_ident(transient_layer)} CASCADE'
+                        ))
+                except Exception:
+                    logging.exception("Nettoyage impossible pour la couche temporaire %s.", transient_layer)
+            _log_resilience_run(
+                main,
+                view_name,
+                selected_alea,
+                "error",
+                round(time.time() - run_started, 2),
+                str(e),
+                owner_user_id=current_user_id,
+                layer_name=(planned_target or {}).get("layer_name"),
+            )
             yield f"data: {json.dumps({'status':'error','message':str(e)})}\n\n"
 
     return Response(stream_with_context(gen()), mimetype='text/event-stream')

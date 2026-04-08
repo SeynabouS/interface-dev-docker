@@ -27,9 +27,9 @@
         #resilience-map { min-height: 520px; border-radius: 12px; border: 1px solid #1e293b; }
         #file-names-container > div { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 10px; }
         #file-names-container input[type="text"] { width: 100%; background: #020617; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 8px 10px; margin-top: 8px; }
-        #import-feedback, #layer-action-feedback { border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 600; border: 1px solid transparent; }
-        #import-feedback.success, #layer-action-feedback.success { color: #6ee7b7; background: rgba(6, 78, 59, 0.35); border-color: rgba(16, 185, 129, 0.45); }
-        #import-feedback.error, #layer-action-feedback.error { color: #fca5a5; background: rgba(127, 29, 29, 0.35); border-color: rgba(239, 68, 68, 0.45); }
+        #import-feedback, #analysis-import-feedback, #layer-action-feedback, #impact-matrix-feedback { border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 600; border: 1px solid transparent; }
+        #import-feedback.success, #analysis-import-feedback.success, #layer-action-feedback.success, #impact-matrix-feedback.success { color: #6ee7b7; background: rgba(6, 78, 59, 0.35); border-color: rgba(16, 185, 129, 0.45); }
+        #import-feedback.error, #analysis-import-feedback.error, #layer-action-feedback.error, #impact-matrix-feedback.error { color: #fca5a5; background: rgba(127, 29, 29, 0.35); border-color: rgba(239, 68, 68, 0.45); }
         .alea-support-card { 
             background: linear-gradient(135deg, rgba(15, 23, 42, 0.8) 0%, rgba(2, 6, 23, 0.9) 100%); 
             border: 1px solid #1e293b;
@@ -147,6 +147,19 @@
         #layer-controls .download-format, #layer-controls .delete-layer-btn, #layer-controls .layer-color { background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; padding: 6px 8px; }
         #layer-controls .delete-layer-btn { border-color: #7f1d1d; color: #fecaca; background: rgba(127, 29, 29, 0.2); }
         #layer-controls .delete-layer-btn:hover { background: rgba(127, 29, 29, 0.4); }
+        #impact-matrix-container { border: 1px solid #334155; border-radius: 12px; background: #020617; overflow: auto; max-height: 340px; }
+        #impact-matrix-container table { width: max-content; min-width: 100%; border-collapse: collapse; }
+        #impact-matrix-container th, #impact-matrix-container td { border: 1px solid #334155; padding: 10px 12px; color: #d1d5db; text-align: center; white-space: nowrap; }
+        #impact-matrix-container thead th { position: sticky; top: 0; z-index: 2; background: #0b1220; vertical-align: top; }
+        #impact-matrix-container tbody th { position: sticky; left: 0; z-index: 1; background: #0f172a; text-align: left; }
+        #impact-matrix-container tbody tr:nth-child(even) td { background: #0f172a; }
+        #impact-matrix-container .impact-matrix-header { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: 150px; }
+        #impact-matrix-container .impact-matrix-title { font-weight: 700; color: #f8fafc; overflow-wrap: anywhere; word-break: break-word; text-align: left; }
+        #impact-matrix-container .impact-matrix-delete { border: 1px solid #7f1d1d; color: #fecaca; background: rgba(127, 29, 29, 0.2); border-radius: 8px; padding: 6px 8px; font-size: 0.75rem; font-weight: 700; }
+        #impact-matrix-container .impact-matrix-delete:hover { background: rgba(127, 29, 29, 0.4); }
+        #impact-matrix-container .impact-matrix-input { width: 90px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 8px 10px; text-align: right; }
+        #impact-matrix-container .impact-matrix-row-label { font-weight: 700; color: #e2e8f0; }
+        #impact-matrix-container em { display: block; padding: 18px 14px; color: #94a3b8; font-style: normal; font-weight: 600; text-align: center; }
         #alea-support-list::-webkit-scrollbar { width: 9px; }
         #alea-support-list::-webkit-scrollbar-track { background: #0f172a; border-radius: 8px; }
         #alea-support-list::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; border: 2px solid #0f172a; }
@@ -195,7 +208,7 @@
                     <div class="p-6 overflow-y-auto h-full space-y-6">
                         <section>
                             <h2 class="text-xl font-semibold mb-3 text-slate-100">Import de couches</h2>
-                            <p class="text-xs text-slate-400 mb-4">Importe les fichiers GPKG / SHP qui alimentent la configuration de résilience.</p>
+                            <p class="text-xs text-slate-400 mb-4">Tout import réalisé ici devient une couche d'aléa partagée, visible sur la carte et disponible pour les analyses de résilience.</p>
 
                             <form id="resilience-form" enctype="multipart/form-data" class="space-y-4">
                                 <div class="border-2 border-dashed border-slate-700 bg-slate-950 rounded-lg p-4">
@@ -241,10 +254,31 @@
 
                     <div id="resilience-map" class="flex-1"></div>
 
-                    <div class="mt-3 bg-slate-900 border border-slate-800 rounded-lg p-3">
-                        <h3 class="text-sm font-semibold mb-2 text-slate-100 uppercase tracking-wide">Gestion des couches visibles</h3>
-                        <div id="layer-controls"></div>
-                        <div id="layer-action-feedback" class="hidden-element mt-3"></div>
+                    <div class="mt-3 grid grid-cols-1 gap-3">
+                        <section class="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                            <h3 class="text-sm font-semibold mb-2 text-slate-100 uppercase tracking-wide">Gestion des couches</h3>
+                            <p class="text-xs text-slate-400 mb-3">Visualisation, téléchargement et suppression des couches partagées de configuration.</p>
+                            <div id="layer-controls"></div>
+                            <div id="layer-action-feedback" class="hidden-element mt-3"></div>
+                        </section>
+
+                        <section class="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                            <div class="flex flex-wrap justify-between items-start gap-3 mb-3">
+                                <div>
+                                    <h3 class="text-sm font-semibold text-slate-100 uppercase tracking-wide">Matrice des impacts</h3>
+                                    <p class="text-xs text-slate-400 mt-2">
+                                        En colonnes: les niveaux d'aléa de 0 à 3. En lignes: les couches d'aléa configurées.
+                                        Chaque cellule correspond à la valeur d'impact à appliquer pendant le run pour la couche et le niveau sélectionnés.
+                                    </p>
+                                </div>
+                                <button type="button" id="impact-matrix-save-btn" class="bg-brand-600 hover:bg-brand-500 text-white font-bold px-4 py-2 rounded transition-colors shadow-lg shadow-brand-500/20">
+                                    Enregistrer
+                                </button>
+                            </div>
+
+                            <div id="impact-matrix-container"><em>Chargement de la matrice des impacts...</em></div>
+                            <div id="impact-matrix-feedback" class="hidden-element mt-3"></div>
+                        </section>
                     </div>
                 </div>
             </div>
@@ -253,10 +287,32 @@
                 <h2 class="text-2xl font-semibold mb-4 text-slate-100">Nouvelle Analyse de Résilience</h2>
 
                 <div class="bg-slate-900 p-6 rounded-lg border border-slate-800 mb-4">
+                    <h3 class="text-sm font-semibold mb-3 text-slate-400 uppercase tracking-wide">Import de votre couche réseau</h3>
+                    <p class="text-xs text-slate-400 mb-4">
+                        Importez ici la couche réseau temporaire utilisée uniquement comme entrée d'analyse. Elle n'est pas enregistrée comme couche persistante dans l'application.
+                    </p>
+
+                    <form id="analysis-upload-form" enctype="multipart/form-data" class="space-y-4">
+                        <div class="border-2 border-dashed border-slate-700 bg-slate-950 rounded-lg p-4">
+                            <label for="analysis-layer-files" class="block text-sm font-medium text-slate-300 mb-2">Fichiers GPKG ou Shapefile</label>
+                            <input type="file" id="analysis-layer-files" name="files" multiple accept=".gpkg,.shp,.shx,.dbf,.prj,.cpg,.sbn,.sbx" class="w-full text-sm text-slate-300">
+                        </div>
+
+                        <div id="analysis-file-names-container" class="space-y-2"></div>
+
+                        <button type="button" id="analysis-upload-btn" class="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3 rounded transition-colors border border-slate-700">
+                            Importer ma couche d'analyse
+                        </button>
+
+                        <div id="analysis-import-feedback" class="hidden-element"></div>
+                    </form>
+                </div>
+
+                <div class="bg-slate-900 p-6 rounded-lg border border-slate-800 mb-4">
                     <h3 class="text-sm font-semibold mb-3 text-slate-400 uppercase tracking-wide">Injection des stress</h3>
                     <p class="text-xs text-brand-400 mb-4 bg-brand-900/20 p-3 rounded border border-brand-800/50">
-                        L'injection de stress correspond aux couches aléas sélectionnées ci-dessous.
-                        Le calcul de résilience lance la création de la vue matérialisée sur la couche principale.
+                        Choisissez votre couche réseau temporaire ci-dessous, puis sélectionnez les couches aléas partagées à injecter en stress.
+                        Seul le résultat du run est conservé pour votre compte.
                     </p>
 
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
