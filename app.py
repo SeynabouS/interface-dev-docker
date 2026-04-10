@@ -575,6 +575,55 @@ def _resolve_actual_table_name(conn, schema: str, table_name: str) -> str:
     return str(row[0])
 
 
+def _collect_postgis_geometry_stats(
+    conn,
+    schema: str,
+    table_name: str,
+    geom_column: str = "geometry",
+) -> dict:
+    qualified_name = _qualified_ident(schema, table_name)
+    quoted_geom = _quote_ident(geom_column)
+    stats = conn.execute(text(f"""
+        SELECT
+            COUNT(*)::bigint AS row_count,
+            COUNT(*) FILTER (WHERE {quoted_geom} IS NULL)::bigint AS null_geometry_count,
+            COUNT(*) FILTER (
+                WHERE {quoted_geom} IS NOT NULL
+                  AND ST_IsEmpty({quoted_geom})
+            )::bigint AS empty_geometry_count,
+            COUNT(*) FILTER (
+                WHERE {quoted_geom} IS NOT NULL
+                  AND NOT ST_IsEmpty({quoted_geom})
+                  AND NOT ST_IsValid({quoted_geom})
+            )::bigint AS invalid_geometry_count
+        FROM {qualified_name}
+    """)).mappings().first() or {}
+    return {
+        "row_count": int(stats.get("row_count") or 0),
+        "null_geometry_count": int(stats.get("null_geometry_count") or 0),
+        "empty_geometry_count": int(stats.get("empty_geometry_count") or 0),
+        "invalid_geometry_count": int(stats.get("invalid_geometry_count") or 0),
+    }
+
+
+def _repair_invalid_postgis_geometries(
+    conn,
+    schema: str,
+    table_name: str,
+    geom_column: str = "geometry",
+) -> int:
+    qualified_name = _qualified_ident(schema, table_name)
+    quoted_geom = _quote_ident(geom_column)
+    result = conn.execute(text(f"""
+        UPDATE {qualified_name}
+        SET {quoted_geom} = ST_MakeValid({quoted_geom})
+        WHERE {quoted_geom} IS NOT NULL
+          AND NOT ST_IsEmpty({quoted_geom})
+          AND NOT ST_IsValid({quoted_geom})
+    """))
+    return max(int(result.rowcount or 0), 0)
+
+
 def _prepare_resilience_gdf_for_import(
     gdf: gpd.GeoDataFrame,
     source_label: str,
@@ -686,6 +735,7 @@ def _import_vector_dataset_via_ogr(path: str, table_name: str, schema: str = "re
         "-overwrite",
         "-nln", table_name,
         "-nlt", "GEOMETRY",
+        "-makevalid",
         "-lco", f"SCHEMA={schema}",
         "-lco", "GEOMETRY_NAME=geometry",
         "--config", "PG_USE_COPY", "YES",
@@ -704,16 +754,17 @@ def _import_vector_dataset_via_ogr(path: str, table_name: str, schema: str = "re
 
     with engine.begin() as conn:
         actual_table_name = _resolve_actual_table_name(conn, schema, table_name)
-        stats = conn.execute(text(f"""
-            SELECT
-                COUNT(*)::bigint AS row_count,
-                COUNT(*) FILTER (WHERE geometry IS NULL)::bigint AS null_geometry_count
-            FROM {_qualified_ident(schema, actual_table_name)}
-        """)).mappings().first()
+        stats_before_repair = _collect_postgis_geometry_stats(conn, schema, actual_table_name)
+        repaired_invalid_count = 0
+        if int(stats_before_repair["invalid_geometry_count"] or 0) > 0:
+            repaired_invalid_count = _repair_invalid_postgis_geometries(conn, schema, actual_table_name)
+        stats = _collect_postgis_geometry_stats(conn, schema, actual_table_name)
         conn.execute(text(f'ANALYZE {_qualified_ident(schema, actual_table_name)}'))
 
-    imported_rows = int((stats or {}).get("row_count") or 0)
-    imported_nulls = int((stats or {}).get("null_geometry_count") or 0)
+    imported_rows = int(stats.get("row_count") or 0)
+    imported_nulls = int(stats.get("null_geometry_count") or 0)
+    imported_empties = int(stats.get("empty_geometry_count") or 0)
+    imported_invalids = int(stats.get("invalid_geometry_count") or 0)
     expected_rows = int(source_info["feature_count"] or 0)
     expected_nulls = int(source_info["null_geometry_count"] or 0)
     if imported_rows != expected_rows:
@@ -721,10 +772,16 @@ def _import_vector_dataset_via_ogr(path: str, table_name: str, schema: str = "re
             f"Import GDAL incomplet pour {source_name}: {imported_rows} ligne(s) importée(s) "
             f"au lieu de {expected_rows}."
         )
-    if imported_nulls != expected_nulls:
+    effective_missing = imported_nulls + imported_empties
+    if effective_missing != expected_nulls:
         raise RuntimeError(
-            f"Import GDAL incohérent pour {source_name}: {imported_nulls} géométrie(s) NULL en base "
-            f"alors que la source en contient {expected_nulls}."
+            f"Import GDAL incohérent pour {source_name}: {effective_missing} géométrie(s) "
+            f"NULL/vides en base alors que la source en contient {expected_nulls}."
+        )
+    if imported_invalids > 0:
+        raise RuntimeError(
+            f"Import GDAL incompletement réparé pour {source_name}: "
+            f"{imported_invalids} géométrie(s) invalide(s) subsistent après correction."
         )
 
     return {
@@ -734,20 +791,21 @@ def _import_vector_dataset_via_ogr(path: str, table_name: str, schema: str = "re
         "source_rows": expected_rows,
         "source_null_geometry_count": expected_nulls,
         "imported_null_geometry_count": imported_nulls,
+        "imported_empty_geometry_count": imported_empties,
+        "imported_invalid_geometry_count": imported_invalids,
+        "repaired_invalid_geometry_count": repaired_invalid_count,
     }
 
 
 def _import_vector_dataset_to_postgis(path: str, table_name: str, schema: str = "resilience") -> dict:
-    try:
-        return _import_vector_dataset_via_ogr(path, table_name, schema=schema)
-    except Exception as exc:
+    if shutil.which("ogr2ogr") is None:
         logging.warning(
-            "Import GDAL indisponible pour %s -> %s (%s). Bascule vers le fallback GeoPandas strict.",
+            "Import GDAL indisponible pour %s -> %s. Bascule vers le fallback GeoPandas strict.",
             path,
             table_name,
-            exc,
         )
         return _import_vector_dataset_via_geopandas(path, table_name, schema=schema)
+    return _import_vector_dataset_via_ogr(path, table_name, schema=schema)
 
 def prepare_gdf_for_postgis(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
