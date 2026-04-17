@@ -1,8 +1,14 @@
 // ========== RESILIENCE.JS COMPLET CORRIGÉ ==========
 
 document.addEventListener('DOMContentLoaded', function () {
+    const resilienceContext = window.RESILIENCE_CONTEXT || {};
+    const isAdminUser = !!resilienceContext.is_admin;
     const map = L.map('resilience-map').setView([48.86, 2.35], 10);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        subdomains: 'abcd',
+        maxZoom: 20,
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+    }).addTo(map);
     window.__resilienceMap = map;
 
     let layerStore = {}; // Stocke les couches actives
@@ -12,12 +18,18 @@ document.addEventListener('DOMContentLoaded', function () {
     const fileInput = document.getElementById('resilience-files');
     const fileNamesContainer = document.getElementById('file-names-container');
     const uploadBtn = document.getElementById('resilience-upload-btn');
+    const configMapPanel = document.getElementById('resilience-map-panel');
+    const configMapFullscreenBtn = document.getElementById('resilience-map-fullscreen-btn');
     const analysisFileInput = document.getElementById('analysis-layer-files');
     const analysisFileNamesContainer = document.getElementById('analysis-file-names-container');
     const analysisUploadBtn = document.getElementById('analysis-upload-btn');
+    const analysisMapContainer = document.getElementById('analysis-map');
+    const analysisMapShell = document.getElementById('analysis-map-shell');
+    const analysisMapPanel = document.getElementById('analysis-map-panel');
+    const analysisMapFullscreenBtn = document.getElementById('analysis-map-fullscreen-btn');
+    const analysisMapStatus = document.getElementById('analysis-map-status');
+    const analysisMapLayerControls = document.getElementById('analysis-map-layer-controls');
 
-    const layerSelect = document.getElementById('layer-selector');
-    const colorPicker = document.getElementById('color-picker');
     const tableContainer = document.getElementById('table-container');
     const tableSelector = document.getElementById('table-selector');
     const layerControls = document.getElementById('layer-controls');
@@ -49,6 +61,20 @@ document.addEventListener('DOMContentLoaded', function () {
     const historyDeleteSelectedBtn = document.getElementById('history-delete-selected-btn');
     const historyResetBtn = document.getElementById('history-reset-btn');
     const historySelectionInfo = document.getElementById('history-selection-info');
+    const adminUserForm = document.getElementById('admin-user-form');
+    const adminUserUsername = document.getElementById('admin-user-username');
+    const adminUserPassword = document.getElementById('admin-user-password');
+    const adminUserIsAdmin = document.getElementById('admin-user-is-admin');
+    const adminUserSubmit = document.getElementById('admin-user-submit');
+    const adminUserList = document.getElementById('admin-user-list');
+    const adminUserFeedback = document.getElementById('admin-user-feedback');
+    const helpPageTitle = document.getElementById('help-page-title');
+    const helpPageBody = document.getElementById('help-page-body');
+    const helpContentForm = document.getElementById('help-content-form');
+    const helpContentTitleInput = document.getElementById('help-content-title-input');
+    const helpContentBodyInput = document.getElementById('help-content-body-input');
+    const helpContentSaveBtn = document.getElementById('help-content-save-btn');
+    const helpContentFeedback = document.getElementById('help-content-feedback');
     const selectedRunIds = new Set();
     let historySearchTimer = null;
     const importFeedback = document.getElementById('import-feedback');
@@ -59,6 +85,24 @@ document.addEventListener('DOMContentLoaded', function () {
     let layerActionFeedbackTimer = null;
     const impactMatrixFeedback = document.getElementById('impact-matrix-feedback');
     let impactMatrixFeedbackTimer = null;
+    let adminUserFeedbackTimer = null;
+    let helpContentFeedbackTimer = null;
+    let analysisMapLayerStore = {};
+    let analysisMapRefreshToken = 0;
+    let analysisMapRefreshTimer = null;
+    let analysisRunChoices = [];
+    const analysisMap = analysisMapContainer
+        ? L.map('analysis-map', { preferCanvas: true }).setView([48.86, 2.35], 10)
+        : null;
+
+    if (analysisMap) {
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            subdomains: 'abcd',
+            maxZoom: 20,
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+        }).addTo(analysisMap);
+        window.__analysisMap = analysisMap;
+    }
 
     // ========== Upload de fichiers ========== //
     const SHP_EXTS = new Set(['.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
@@ -174,6 +218,346 @@ document.addEventListener('DOMContentLoaded', function () {
         return `Suppression impossible pour la couche "${layer}" : ${errorMessage || 'erreur inconnue.'}`;
     }
 
+    function setAnalysisMapStatus(message, tone = 'neutral') {
+        if (!analysisMapStatus) return;
+        analysisMapStatus.textContent = message;
+        analysisMapStatus.classList.remove('text-slate-400', 'text-red-400', 'text-emerald-400', 'text-brand-400');
+        if (tone === 'error') {
+            analysisMapStatus.classList.add('text-red-400');
+        } else if (tone === 'success') {
+            analysisMapStatus.classList.add('text-emerald-400');
+        } else if (tone === 'info') {
+            analysisMapStatus.classList.add('text-brand-400');
+        } else {
+            analysisMapStatus.classList.add('text-slate-400');
+        }
+    }
+
+    function isConfigMapFullscreen() {
+        if (!configMapPanel) return false;
+        return document.fullscreenElement === configMapPanel
+            || document.webkitFullscreenElement === configMapPanel
+            || configMapPanel.classList.contains('resilience-map-panel-fallback-fullscreen');
+    }
+
+    function syncConfigMapFullscreenButton() {
+        if (!configMapFullscreenBtn) return;
+        configMapFullscreenBtn.textContent = isConfigMapFullscreen() ? 'Quitter plein écran' : 'Plein écran';
+        setTimeout(() => map.invalidateSize(), 140);
+    }
+
+    async function toggleConfigMapFullscreen() {
+        if (!configMapPanel) return;
+
+        try {
+            if (document.fullscreenElement === configMapPanel || document.webkitFullscreenElement === configMapPanel) {
+                if (document.exitFullscreen) {
+                    await document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                }
+            } else if (configMapPanel.requestFullscreen) {
+                await configMapPanel.requestFullscreen();
+            } else if (configMapPanel.webkitRequestFullscreen) {
+                configMapPanel.webkitRequestFullscreen();
+            } else {
+                configMapPanel.classList.toggle('resilience-map-panel-fallback-fullscreen');
+            }
+        } catch (_error) {
+            configMapPanel.classList.toggle('resilience-map-panel-fallback-fullscreen');
+        }
+
+        syncConfigMapFullscreenButton();
+    }
+
+    function clearAnalysisMapLayers() {
+        if (!analysisMap) return;
+        Object.values(analysisMapLayerStore).forEach((layer) => {
+            if (layer && analysisMap.hasLayer(layer)) {
+                analysisMap.removeLayer(layer);
+            }
+        });
+        analysisMapLayerStore = {};
+    }
+
+    function fetchResilienceLayerData(layerName) {
+        return fetch(`/resilience_layer_data/${encodeURIComponent(layerName)}`)
+            .then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+                return data;
+            });
+    }
+
+    function buildAnalysisPreviewPopup(layerName, roleLabel, properties) {
+        const safeRole = escapeHtml(roleLabel);
+        const safeLayer = escapeHtml(layerName);
+        const propEntries = Object.entries(properties || {});
+        const propHtml = propEntries.length
+            ? propEntries.map(([key, value]) => `<strong>${escapeHtml(key)}</strong>: ${escapeHtml(value ?? '')}`).join('<br>')
+            : '<em>Aucun attribut</em>';
+        return `<div><strong>${safeRole}</strong><br><span>${safeLayer}</span><hr style="margin:6px 0;border-color:#334155;">${propHtml}</div>`;
+    }
+
+    function defaultAnalysisLayerColor(role, index = 0) {
+        const runColors = ['#a855f7', '#ef4444', '#0ea5e9', '#84cc16', '#f59e0b', '#ec4899'];
+        return role === 'main' ? '#f97316' : runColors[index % runColors.length];
+    }
+
+    function getAnalysisMapLayerStateMap() {
+        const state = {};
+        if (!analysisMapLayerControls) return state;
+
+        Array.from(analysisMapLayerControls.querySelectorAll('.analysis-map-layer-row[data-layer]')).forEach((row, index) => {
+            const layerName = String(row.dataset.layer || '').trim();
+            if (!layerName) return;
+
+            const role = String(row.dataset.role || 'run').trim();
+            const toggle = row.querySelector('.analysis-map-layer-toggle');
+            const colorInput = row.querySelector('.analysis-map-layer-color');
+            state[layerName] = {
+                checked: !!(toggle && toggle.checked),
+                color: colorInput && colorInput.value ? colorInput.value : defaultAnalysisLayerColor(role, index),
+                role
+            };
+        });
+
+        return state;
+    }
+
+    function renderAnalysisMapLayerControls(preferredState = {}) {
+        if (!analysisMapLayerControls) return;
+
+        const mainLayerName = String((aleaMainLayer && aleaMainLayer.value) || '').trim();
+        const doneRuns = Array.isArray(analysisRunChoices)
+            ? analysisRunChoices
+                .filter((run) => String(run.status || '').toLowerCase() === 'done')
+                .filter((run) => String(run.view_name || run.layer_name || '').trim().length > 0)
+            : [];
+
+        analysisMapLayerControls.innerHTML = '';
+
+        if (!mainLayerName && !doneRuns.length) {
+            analysisMapLayerControls.innerHTML = '<em>Aucune couche infra temporaire ni aucun run disponible pour la carte.</em>';
+            return;
+        }
+
+        if (mainLayerName) {
+            const mainState = preferredState[mainLayerName] || {};
+            const wrapper = document.createElement('div');
+            wrapper.className = 'analysis-map-layer-row';
+            wrapper.dataset.layer = mainLayerName;
+            wrapper.dataset.role = 'main';
+            wrapper.innerHTML = `
+                <input type="checkbox" class="analysis-map-layer-toggle" data-layer="${escapeHtml(mainLayerName)}" checked>
+                <label>
+                    <strong>${escapeHtml(mainLayerName)}</strong><br>
+                    <span class="text-xs text-slate-500">Couche infra importée pour l'analyse réseau</span>
+                </label>
+                <input type="color" class="layer-color analysis-map-layer-color" data-layer="${escapeHtml(mainLayerName)}" value="${escapeHtml(mainState.color || defaultAnalysisLayerColor('main', 0))}">
+            `;
+            const toggle = wrapper.querySelector('.analysis-map-layer-toggle');
+            if (toggle) {
+                toggle.checked = typeof mainState.checked === 'boolean' ? mainState.checked : true;
+            }
+            analysisMapLayerControls.appendChild(wrapper);
+        }
+
+        doneRuns.forEach((run, index) => {
+            const layerName = String(run.view_name || run.layer_name || '').trim();
+            if (!layerName) return;
+
+            const runState = preferredState[layerName] || {};
+            const subtitleParts = ['Run utilisateur'];
+            const createdAt = formatRunDate(run.created_at);
+            if (createdAt) subtitleParts.push(createdAt);
+            if (run.main_layer) subtitleParts.push(`source: ${run.main_layer}`);
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'analysis-map-layer-row';
+            wrapper.dataset.layer = layerName;
+            wrapper.dataset.role = 'run';
+            wrapper.innerHTML = `
+                <input type="checkbox" class="analysis-map-layer-toggle" data-layer="${escapeHtml(layerName)}">
+                <label>
+                    <strong>${escapeHtml(layerName)}</strong><br>
+                    <span class="text-xs text-slate-500">${escapeHtml(subtitleParts.join(' · '))}</span>
+                </label>
+                <input type="color" class="layer-color analysis-map-layer-color" data-layer="${escapeHtml(layerName)}" value="${escapeHtml(runState.color || defaultAnalysisLayerColor('run', index))}">
+            `;
+            const toggle = wrapper.querySelector('.analysis-map-layer-toggle');
+            if (toggle) {
+                toggle.checked = typeof runState.checked === 'boolean' ? runState.checked : false;
+            }
+            analysisMapLayerControls.appendChild(wrapper);
+        });
+    }
+
+    function createAnalysisPreviewLayer(layerName, role, features, color) {
+        const roleLabel = role === 'main' ? 'Couche infra importée' : 'Résultat de run';
+
+        return L.geoJSON(features || [], {
+            style: () => ({
+                color,
+                weight: 3,
+                opacity: role === 'main' ? 0.95 : 0.8,
+                fillColor: color,
+                fillOpacity: role === 'main' ? 0.08 : 0.06,
+                dashArray: role === 'main' ? null : '10 6'
+            }),
+            pointToLayer: (_feature, latlng) => L.circleMarker(latlng, {
+                radius: 6,
+                color,
+                weight: 2,
+                fillColor: color,
+                fillOpacity: role === 'main' ? 0.3 : 0.12
+            }),
+            onEachFeature: (feature, layer) => {
+                layer.bindPopup(buildAnalysisPreviewPopup(layerName, roleLabel, feature.properties || {}));
+            }
+        });
+    }
+
+    function getAnalysisPreviewSelection() {
+        const mainLayerName = String((aleaMainLayer && aleaMainLayer.value) || '').trim();
+        const selectedLayers = analysisMapLayerControls
+            ? Array.from(analysisMapLayerControls.querySelectorAll('.analysis-map-layer-row[data-layer]'))
+                .map((row, index) => {
+                    const layerName = String(row.dataset.layer || '').trim();
+                    if (!layerName) return null;
+
+                    const toggle = row.querySelector('.analysis-map-layer-toggle');
+                    if (!toggle || !toggle.checked) return null;
+
+                    const role = String(row.dataset.role || 'run').trim();
+                    const colorInput = row.querySelector('.analysis-map-layer-color');
+                    return {
+                        key: `${role}:${layerName}`,
+                        name: layerName,
+                        role,
+                        index,
+                        color: colorInput && colorInput.value ? colorInput.value : defaultAnalysisLayerColor(role, index)
+                    };
+                })
+                .filter(Boolean)
+            : [];
+
+        return { mainLayerName, selectedLayers };
+    }
+
+    function scheduleAnalysisMapRefresh(delay = 120) {
+        if (!analysisMap) return;
+        if (analysisMapRefreshTimer) clearTimeout(analysisMapRefreshTimer);
+        analysisMapRefreshTimer = setTimeout(() => {
+            analysisMapRefreshTimer = null;
+            refreshAnalysisMapPreview();
+        }, delay);
+    }
+
+    async function refreshAnalysisMapPreview() {
+        if (!analysisMap) return;
+
+        const token = ++analysisMapRefreshToken;
+        const { mainLayerName, selectedLayers } = getAnalysisPreviewSelection();
+        clearAnalysisMapLayers();
+        analysisMap.invalidateSize();
+
+        if (!selectedLayers.length) {
+            if (mainLayerName) {
+                setAnalysisMapStatus("Cochez la couche infra importée et/ou les runs à afficher sur la carte.", 'neutral');
+            } else {
+                setAnalysisMapStatus("Importez une couche infra ou cochez un run utilisateur pour afficher la carte d'analyse.", 'neutral');
+            }
+            return;
+        }
+
+        setAnalysisMapStatus('Chargement de la carte d’analyse...', 'info');
+
+        const results = await Promise.all(selectedLayers.map(async (spec) => {
+            try {
+                const data = await fetchResilienceLayerData(spec.name);
+                if (token !== analysisMapRefreshToken) return null;
+                const layer = createAnalysisPreviewLayer(spec.name, spec.role, data.features, spec.color);
+                layer.addTo(analysisMap);
+                analysisMapLayerStore[spec.key] = layer;
+                return { spec, layer };
+            } catch (error) {
+                return { spec, error };
+            }
+        }));
+
+        if (token !== analysisMapRefreshToken) return;
+
+        const loadedLayers = results.filter((result) => result && result.layer);
+        const failedLayers = results.filter((result) => result && result.error);
+
+        if (!loadedLayers.length) {
+            const firstError = failedLayers[0] && failedLayers[0].error ? failedLayers[0].error.message : "Aucune couche n'a pu être chargée.";
+            setAnalysisMapStatus(firstError, 'error');
+            return;
+        }
+
+        const boundsGroup = L.featureGroup(loadedLayers.map((entry) => entry.layer));
+        const bounds = boundsGroup.getBounds();
+        if (bounds && bounds.isValid()) {
+            analysisMap.fitBounds(bounds.pad(0.08));
+        }
+
+        const hasMainLayer = selectedLayers.some((layer) => layer.role === 'main');
+        const selectedRunCount = selectedLayers.filter((layer) => layer.role === 'run').length;
+        let statusMessage = hasMainLayer
+            ? `Couche infra affichée: ${mainLayerName || 'couche importée'}`
+            : 'Couche infra non affichée';
+        statusMessage += selectedRunCount
+            ? ` · ${selectedRunCount} run(s) utilisateur superposé(s).`
+            : ' · aucun run utilisateur affiché.';
+        if (failedLayers.length) {
+            statusMessage += ` · ${failedLayers.length} couche(s) n'ont pas pu être chargées.`;
+        }
+        setAnalysisMapStatus(statusMessage, failedLayers.length ? 'error' : 'success');
+    }
+
+    function isAnalysisMapFullscreen() {
+        if (!analysisMapShell) return false;
+        return document.fullscreenElement === analysisMapShell
+            || document.webkitFullscreenElement === analysisMapShell
+            || analysisMapShell.classList.contains('analysis-map-shell-fallback-fullscreen');
+    }
+
+    function syncAnalysisMapFullscreenButton() {
+        if (!analysisMapFullscreenBtn) return;
+        analysisMapFullscreenBtn.textContent = isAnalysisMapFullscreen() ? 'Quitter plein écran' : 'Plein écran';
+        if (analysisMap) {
+            setTimeout(() => analysisMap.invalidateSize(), 140);
+        }
+    }
+
+    async function toggleAnalysisMapFullscreen() {
+        if (!analysisMapShell) return;
+
+        try {
+            if (document.fullscreenElement === analysisMapShell || document.webkitFullscreenElement === analysisMapShell) {
+                if (document.exitFullscreen) {
+                    await document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                }
+            } else if (analysisMapShell.requestFullscreen) {
+                await analysisMapShell.requestFullscreen();
+            } else if (analysisMapShell.webkitRequestFullscreen) {
+                analysisMapShell.webkitRequestFullscreen();
+            } else {
+                analysisMapShell.classList.toggle('analysis-map-shell-fallback-fullscreen');
+            }
+        } catch (_error) {
+            analysisMapShell.classList.toggle('analysis-map-shell-fallback-fullscreen');
+        }
+
+        syncAnalysisMapFullscreenButton();
+    }
+
     function updateAleaSelectedCount() {
         if (!layerAlea || !aleaSelectedCount) return;
         const total = layerAlea.options.length;
@@ -246,6 +630,82 @@ document.addEventListener('DOMContentLoaded', function () {
             return '<span class="bg-red-900/40 text-red-400 border border-red-800/50 px-2 py-1 rounded text-xs font-medium">Erreur</span>';
         }
         return `<span class="bg-slate-800 border border-slate-700 text-slate-300 px-2 py-1 rounded text-xs font-medium">${escapeHtml(status || 'Inconnu')}</span>`;
+    }
+
+    function helpBodyToHtml(body) {
+        const raw = String(body || '').trim();
+        if (!raw) {
+            return '<em class="text-slate-500 not-italic">Aucun contenu d\'aide disponible.</em>';
+        }
+
+        return raw
+            .split(/\n\s*\n/)
+            .map((block) => block.trim())
+            .filter(Boolean)
+            .map((block) => `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`)
+            .join('');
+    }
+
+    function renderHelpContent(content) {
+        const safeContent = content || {};
+        if (helpPageTitle) {
+            helpPageTitle.textContent = safeContent.title || 'Aide & Documentation';
+        }
+        if (helpPageBody) {
+            helpPageBody.innerHTML = helpBodyToHtml(safeContent.body);
+        }
+        if (helpContentTitleInput) {
+            helpContentTitleInput.value = safeContent.title || '';
+        }
+        if (helpContentBodyInput) {
+            helpContentBodyInput.value = safeContent.body || '';
+        }
+    }
+
+    function renderAdminUserList(users) {
+        if (!adminUserList) return;
+
+        if (!Array.isArray(users) || !users.length) {
+            adminUserList.innerHTML = '<em class="text-slate-500 not-italic">Aucun utilisateur trouvé.</em>';
+            return;
+        }
+
+        adminUserList.innerHTML = `
+            <div class="overflow-x-auto border border-slate-800 rounded-lg">
+                <table class="w-full text-sm">
+                    <thead class="bg-slate-950 text-slate-400">
+                        <tr>
+                            <th class="text-left px-4 py-3 font-medium">Utilisateur</th>
+                            <th class="text-left px-4 py-3 font-medium">Rôle</th>
+                            <th class="text-left px-4 py-3 font-medium">Admin</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800">
+                        ${users.map((user) => `
+                            <tr class="bg-slate-900/70">
+                                <td class="px-4 py-3 text-slate-200">
+                                    <span class="font-medium">${escapeHtml(user.username || '')}</span>
+                                    ${user.is_current_user ? '<span class="ml-2 inline-flex items-center px-2 py-1 rounded border border-brand-800/60 bg-brand-900/20 text-brand-300 text-[11px]">vous</span>' : ''}
+                                </td>
+                                <td class="px-4 py-3 text-slate-400">${user.is_admin ? 'Administrateur' : 'Utilisateur'}</td>
+                                <td class="px-4 py-3 text-slate-300">
+                                    <label class="inline-flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            class="admin-user-role-toggle accent-cyan-500"
+                                            data-user-id="${escapeHtml(String(user.id || ''))}"
+                                            ${user.is_admin ? 'checked' : ''}
+                                            ${user.is_current_user ? 'disabled' : ''}
+                                        >
+                                        <span>${user.is_current_user ? 'Compte courant' : 'Accorder le rôle admin'}</span>
+                                    </label>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
     }
 
     function updateHistorySelectionUi() {
@@ -370,7 +830,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 return r.json();
             })
-            .then((runs) => renderHistoryRows(runs))
+            .then((runs) => {
+                renderHistoryRows(runs);
+            })
             .catch((e) => {
                 historyList.innerHTML = `
                     <tr>
@@ -390,6 +852,8 @@ document.addEventListener('DOMContentLoaded', function () {
         if (timerName === 'analysis' && analysisImportFeedbackTimer) clearTimeout(analysisImportFeedbackTimer);
         if (timerName === 'layer' && layerActionFeedbackTimer) clearTimeout(layerActionFeedbackTimer);
         if (timerName === 'impact' && impactMatrixFeedbackTimer) clearTimeout(impactMatrixFeedbackTimer);
+        if (timerName === 'admin' && adminUserFeedbackTimer) clearTimeout(adminUserFeedbackTimer);
+        if (timerName === 'help' && helpContentFeedbackTimer) clearTimeout(helpContentFeedbackTimer);
 
         element.classList.remove('hidden-element', 'success', 'error');
         element.classList.add(type === 'error' ? 'error' : 'success');
@@ -403,6 +867,8 @@ document.addEventListener('DOMContentLoaded', function () {
         if (timerName === 'analysis') analysisImportFeedbackTimer = timer;
         if (timerName === 'layer') layerActionFeedbackTimer = timer;
         if (timerName === 'impact') impactMatrixFeedbackTimer = timer;
+        if (timerName === 'admin') adminUserFeedbackTimer = timer;
+        if (timerName === 'help') helpContentFeedbackTimer = timer;
     }
 
     function showImportFeedback(message, type = 'success') {
@@ -420,6 +886,55 @@ document.addEventListener('DOMContentLoaded', function () {
     function showImpactMatrixFeedback(message, type = 'success') {
         showFeedback(impactMatrixFeedback, 'impact', message, type, 7000);
     }
+
+    function showAdminUserFeedback(message, type = 'success') {
+        showFeedback(adminUserFeedback, 'admin', message, type, 7000);
+    }
+
+    function showHelpContentFeedback(message, type = 'success') {
+        showFeedback(helpContentFeedback, 'help', message, type, 7000);
+    }
+
+    function loadResilienceAdminUsers() {
+        if (!isAdminUser || !adminUserList) return Promise.resolve([]);
+
+        adminUserList.innerHTML = '<em class="text-slate-500 not-italic">Chargement des utilisateurs...</em>';
+        return fetch('/resilience_admin_users')
+            .then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+                const users = Array.isArray(data.users) ? data.users : [];
+                renderAdminUserList(users);
+                return users;
+            })
+            .catch((error) => {
+                adminUserList.innerHTML = `<em class="text-red-400 not-italic">Erreur de chargement: ${escapeHtml(error.message)}</em>`;
+                return [];
+            });
+    }
+
+    function loadResilienceHelpContent() {
+        return fetch('/resilience_help_content')
+            .then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+                renderHelpContent(data.content || {});
+                return data.content || {};
+            })
+            .catch((error) => {
+                if (helpPageBody) {
+                    helpPageBody.innerHTML = `<em class="text-red-400 not-italic">Erreur de chargement: ${escapeHtml(error.message)}</em>`;
+                }
+                return null;
+            });
+    }
+
+    window.loadResilienceAdminUsers = loadResilienceAdminUsers;
+    window.loadResilienceHelpContent = loadResilienceHelpContent;
 
     function renderImpactMatrix(payload) {
         if (!impactMatrixContainer) return;
@@ -826,11 +1341,22 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     if (layerAlea) {
-        layerAlea.addEventListener('change', updateAleaSelectedCount);
+        layerAlea.addEventListener('change', () => {
+            updateAleaSelectedCount();
+        });
     }
 
     if (aleaAllCheckbox) {
-        aleaAllCheckbox.addEventListener('change', syncAleaSelectionMode);
+        aleaAllCheckbox.addEventListener('change', () => {
+            syncAleaSelectionMode();
+        });
+    }
+
+    if (aleaMainLayer) {
+        aleaMainLayer.addEventListener('change', () => {
+            renderAnalysisMapLayerControls(getAnalysisMapLayerStateMap());
+            scheduleAnalysisMapRefresh();
+        });
     }
 
     if (aleaClearBtn) {
@@ -842,6 +1368,16 @@ document.addEventListener('DOMContentLoaded', function () {
             });
             syncAleaSelectionMode();
             layerAlea.dispatchEvent(new Event('change'));
+        });
+    }
+
+    if (analysisMapLayerControls) {
+        analysisMapLayerControls.addEventListener('change', (event) => {
+            const target = event.target;
+            if (!target || (!target.classList.contains('analysis-map-layer-toggle') && !target.classList.contains('analysis-map-layer-color'))) {
+                return;
+            }
+            scheduleAnalysisMapRefresh();
         });
     }
 
@@ -868,6 +1404,123 @@ document.addEventListener('DOMContentLoaded', function () {
             }
 
             layerAlea.focus();
+        });
+    }
+
+    if (analysisMapFullscreenBtn) {
+        analysisMapFullscreenBtn.addEventListener('click', () => {
+            toggleAnalysisMapFullscreen();
+        });
+    }
+
+    if (configMapFullscreenBtn) {
+        configMapFullscreenBtn.addEventListener('click', () => {
+            toggleConfigMapFullscreen();
+        });
+    }
+
+    document.addEventListener('fullscreenchange', () => {
+        syncAnalysisMapFullscreenButton();
+        syncConfigMapFullscreenButton();
+    });
+    document.addEventListener('webkitfullscreenchange', () => {
+        syncAnalysisMapFullscreenButton();
+        syncConfigMapFullscreenButton();
+    });
+
+    if (adminUserForm) {
+        adminUserForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            if (!isAdminUser) return;
+
+            const username = String((adminUserUsername && adminUserUsername.value) || '').trim();
+            const password = String((adminUserPassword && adminUserPassword.value) || '');
+            const isAdmin = !!(adminUserIsAdmin && adminUserIsAdmin.checked);
+
+            adminUserSubmit.disabled = true;
+            fetch('/resilience_admin_users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, is_admin: isAdmin })
+            })
+                .then(async (response) => {
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok || data.status !== 'ok') {
+                        throw new Error(data.message || `HTTP ${response.status}`);
+                    }
+                    showAdminUserFeedback(data.message || 'Utilisateur créé.', 'success');
+                    adminUserForm.reset();
+                    return loadResilienceAdminUsers();
+                })
+                .catch((error) => {
+                    showAdminUserFeedback(`Erreur: ${error.message}`, 'error');
+                })
+                .finally(() => {
+                    adminUserSubmit.disabled = false;
+                });
+        });
+    }
+
+    if (adminUserList) {
+        adminUserList.addEventListener('change', (event) => {
+            const toggle = event.target.closest('.admin-user-role-toggle[data-user-id]');
+            if (!toggle) return;
+
+            const userId = String(toggle.dataset.userId || '').trim();
+            if (!userId) return;
+
+            toggle.disabled = true;
+            fetch(`/resilience_admin_users/${encodeURIComponent(userId)}/role`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_admin: toggle.checked })
+            })
+                .then(async (response) => {
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok || data.status !== 'ok') {
+                        throw new Error(data.message || `HTTP ${response.status}`);
+                    }
+                    showAdminUserFeedback(data.message || 'Rôle mis à jour.', 'success');
+                    return loadResilienceAdminUsers();
+                })
+                .catch((error) => {
+                    showAdminUserFeedback(`Erreur: ${error.message}`, 'error');
+                    loadResilienceAdminUsers();
+                })
+                .finally(() => {
+                    toggle.disabled = false;
+                });
+        });
+    }
+
+    if (helpContentForm) {
+        helpContentForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            if (!isAdminUser) return;
+
+            const title = String((helpContentTitleInput && helpContentTitleInput.value) || '').trim();
+            const body = String((helpContentBodyInput && helpContentBodyInput.value) || '').trim();
+
+            helpContentSaveBtn.disabled = true;
+            fetch('/resilience_help_content', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, body })
+            })
+                .then(async (response) => {
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok || data.status !== 'ok') {
+                        throw new Error(data.message || `HTTP ${response.status}`);
+                    }
+                    renderHelpContent(data.content || {});
+                    showHelpContentFeedback(data.message || 'Documentation mise à jour.', 'success');
+                })
+                .catch((error) => {
+                    showHelpContentFeedback(`Erreur: ${error.message}`, 'error');
+                })
+                .finally(() => {
+                    helpContentSaveBtn.disabled = false;
+                });
         });
     }
 
@@ -934,6 +1587,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 .then((data) => {
                     alert(`${data.deleted_count || 0} run(s) supprimé(s).`);
                     selectedRunIds.clear();
+                    updateLayerList();
                     loadResilienceHistory();
                 })
                 .catch((e) => {
@@ -968,6 +1622,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 .then(() => {
                     alert('Historique réinitialisé.');
                     selectedRunIds.clear();
+                    updateLayerList();
                     loadResilienceHistory();
                 })
                 .catch((e) => {
@@ -1110,15 +1765,15 @@ document.addEventListener('DOMContentLoaded', function () {
     // ========== Mise à jour des couches disponibles ========== //
     function updateLayerList(preferredAnalysisLayer = null) {
         const previousTableSelection = tableSelector ? tableSelector.value : '';
-        const previousMapSelection = layerSelect ? layerSelect.value : '';
         const previousAnalysisSelection = preferredAnalysisLayer || (aleaMainLayer ? aleaMainLayer.value : '');
+        const previousAnalysisMapState = getAnalysisMapLayerStateMap();
         const tableOptionValues = new Set();
 
-        layerSelect.innerHTML = '';
         tableSelector.innerHTML = '';
         layerControls.innerHTML = '';
         if (layerAlea) layerAlea.innerHTML = '';
         if (aleaMainLayer) aleaMainLayer.innerHTML = '';
+        if (analysisMapLayerControls) analysisMapLayerControls.innerHTML = '<em>Chargement des couches cartographiques d\'analyse...</em>';
         if (aleaSupportList) aleaSupportList.innerHTML = '<em>Chargement des couches de support...</em>';
         if (aleaSupportCount) aleaSupportCount.textContent = '...';
         if (impactMatrixContainer) impactMatrixContainer.innerHTML = '<em>Chargement de la matrice des impacts...</em>';
@@ -1126,6 +1781,7 @@ document.addEventListener('DOMContentLoaded', function () {
         layerStore = {};
         mainLayers = [];
         aleaLayers = [];
+        analysisRunChoices = [];
         syncAleaSelectionMode();
         loadImpactMatrix();
 
@@ -1145,12 +1801,6 @@ document.addEventListener('DOMContentLoaded', function () {
                     tableSelector.value = previousTableSelection;
                 }
             }
-            if (layerSelect && previousMapSelection) {
-                const option = Array.from(layerSelect.options).find((opt) => opt.value === previousMapSelection);
-                if (option) {
-                    layerSelect.value = previousMapSelection;
-                }
-            }
         }
 
         // Charger les couches partagées pour la configuration cartographique.
@@ -1160,11 +1810,6 @@ document.addEventListener('DOMContentLoaded', function () {
                 mainLayers = Array.isArray(layers) ? layers : [];
 
                 mainLayers.forEach(layer => {
-                    const opt = document.createElement('option');
-                    opt.value = layer;
-                    opt.textContent = layer;
-                    layerSelect.appendChild(opt);
-
                     appendTableOption(layer, layer);
 
                     const wrapper = document.createElement('div');
@@ -1205,12 +1850,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
 
                 syncAleaSelectionMode();
+                scheduleAnalysisMapRefresh();
             })
             .catch(() => {
                 aleaLayers = [];
                 if (aleaSupportList) aleaSupportList.innerHTML = '<em>Erreur lors du chargement des couches support.</em>';
                 if (aleaSupportCount) aleaSupportCount.textContent = 'Erreur';
                 syncAleaSelectionMode();
+                scheduleAnalysisMapRefresh();
             });
 
         // Charger les couches privées d'analyse pour l'utilisateur courant.
@@ -1227,6 +1874,7 @@ document.addEventListener('DOMContentLoaded', function () {
                         aleaMainLayer.appendChild(placeholder);
                     } else {
                         analysisLayers.forEach((layer) => {
+                            appendTableOption(layer, `${layer} · Couche infra importée`);
                             const opt = document.createElement('option');
                             opt.value = layer;
                             opt.textContent = layer;
@@ -1239,7 +1887,9 @@ document.addEventListener('DOMContentLoaded', function () {
                         }
                     }
                 }
+                renderAnalysisMapLayerControls(previousAnalysisMapState);
                 restoreSelections();
+                scheduleAnalysisMapRefresh();
             })
             .catch(() => {
                 if (aleaMainLayer) {
@@ -1248,6 +1898,32 @@ document.addEventListener('DOMContentLoaded', function () {
                     placeholder.textContent = 'Erreur chargement couche temporaire';
                     aleaMainLayer.appendChild(placeholder);
                 }
+                renderAnalysisMapLayerControls(previousAnalysisMapState);
+                scheduleAnalysisMapRefresh();
+            });
+
+        fetch('/resilience_runs_history?limit=200')
+            .then((r) => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
+            .then((runs) => {
+                analysisRunChoices = Array.isArray(runs) ? runs : [];
+                analysisRunChoices
+                    .filter((run) => String(run.status || '').toLowerCase() === 'done')
+                    .forEach((run) => {
+                        const layerName = String(run.view_name || run.layer_name || '').trim();
+                        if (!layerName) return;
+                        appendTableOption(layerName, `${layerName} · Run utilisateur`);
+                    });
+                renderAnalysisMapLayerControls(previousAnalysisMapState);
+                restoreSelections();
+                scheduleAnalysisMapRefresh();
+            })
+            .catch(() => {
+                analysisRunChoices = [];
+                renderAnalysisMapLayerControls(previousAnalysisMapState);
+                scheduleAnalysisMapRefresh();
             });
     }
 
@@ -1262,7 +1938,7 @@ document.addEventListener('DOMContentLoaded', function () {
             delete layerStore[layerName];
         }
         // Recharge la couche depuis le backend
-        fetch(`/resilience_layer_data/${layerName}`)
+        fetch(`/resilience_layer_data/${encodeURIComponent(layerName)}`)
             .then(r => r.json())
             .then(data => {
                 if (data.status !== 'ok') throw new Error(data.message);
@@ -1293,7 +1969,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function loadAttributeTable(layerName) {
-        fetch(`/resilience_layer_data/${layerName}`)
+        fetch(`/resilience_layer_data/${encodeURIComponent(layerName)}`)
             .then(r => r.json())
             .then(data => {
                 if (data.status !== 'ok') throw new Error(data.message);
@@ -1316,14 +1992,6 @@ document.addEventListener('DOMContentLoaded', function () {
     tableSelector.addEventListener('change', () => {
         const selected = tableSelector.value;
         if (selected) loadAttributeTable(selected);
-    });
-
-    layerSelect.addEventListener('change', () => {
-        displayLayer(layerSelect.value, colorPicker.value);
-    });
-
-    colorPicker.addEventListener('input', () => {
-        if (layerSelect.value) displayLayer(layerSelect.value, colorPicker.value);
     });
 
     layerControls.addEventListener('change', function (e) {
@@ -1371,5 +2039,11 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     updateHistorySelectionUi();
+    syncAnalysisMapFullscreenButton();
+    syncConfigMapFullscreenButton();
+    loadResilienceHelpContent();
+    if (isAdminUser) {
+        loadResilienceAdminUsers();
+    }
     updateLayerList(); // démarrage
 });

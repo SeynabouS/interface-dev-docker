@@ -17,6 +17,8 @@ AUTH_PREFIX_PATHS = (
 
 RESILIENCE_EXACT_PATHS = {
     "/resilience",
+    "/resilience_admin_users",
+    "/resilience_help_content",
     "/upload_resilience",
     "/upload_resilience_analysis_layer",
     "/resilience_layers",
@@ -31,6 +33,7 @@ RESILIENCE_EXACT_PATHS = {
     "/alea_view_batch_stream",
 }
 RESILIENCE_PREFIX_PATHS = (
+    "/resilience_admin_users/",
     "/resilience_layer_data/",
     "/resilience_dependencies/",
     "/download_resilience_layer/",

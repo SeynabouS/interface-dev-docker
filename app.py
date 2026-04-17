@@ -52,6 +52,18 @@ SIDE_CAR_EXTS = {'.dbf', '.shx', '.prj', '.cpg', '.sbn', '.sbx'}
 RESILIENCE_ANALYSIS_SESSION_KEY = "resilience_analysis_upload"
 RESILIENCE_ANALYSIS_STAGE_DIRNAME = "resilience_analysis_stage"
 RESILIENCE_IMPACT_LEVELS = (0, 1, 2, 3)
+RESILIENCE_HELP_PAGE_KEY = "resilience_manual"
+ADMIN_SUPPORT_INIT_LOCK_KEY = 8201001
+RUN_HISTORY_INIT_LOCK_KEY = 8201002
+DEFAULT_RESILIENCE_HELP_TITLE = "Manuel d'utilisation SippeRésiste"
+DEFAULT_RESILIENCE_HELP_BODY = (
+    "1. Configuration: importer les couches et contrôler leur affichage cartographique.\n\n"
+    "2. Analyse Réseau: importer une couche infra temporaire, sélectionner les aléas à injecter "
+    "et lancer le calcul de résilience.\n\n"
+    "3. Historique runs: consulter les exécutions passées, leurs exports et la table attributaire.\n\n"
+    "4. Admin. & Accès: créer des comptes et définir les droits administrateur.\n\n"
+    "5. Aide & Doc: maintenir la documentation visible par les utilisateurs."
+)
 
 # --- Options app ---
 app.config['RESET_LINK_VIA_UI'] = os.getenv('RESET_LINK_VIA_UI', '0') == '1'
@@ -89,6 +101,8 @@ engine = create_engine(app.config['SQLALCHEMY_DATABASE_URI'], pool_pre_ping=True
 # --- Base URL pour appels HTTP internes (à la place de 127.0.0.1:5000 en dev) ---
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000")
 _KEY_COLUMN_CACHE: dict[tuple[str, str], str | None] = {}
+_ADMIN_SUPPORT_READY = False
+_RUN_HISTORY_READY = False
 
 def _quote_ident(identifier: str) -> str:
     """
@@ -132,6 +146,7 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(50), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
+    is_admin = db.Column(db.Boolean, nullable=False, default=False, server_default=text('false'))
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -149,6 +164,7 @@ def make_reset_token(user):
     return _serializer().dumps(payload)
 
 def load_user_from_token(token, max_age_seconds=3600):
+    _ensure_admin_support_tables()
     data = _serializer().loads(token, max_age=max_age_seconds)
     user = User.query.get(data.get('uid'))
     if not user or user.password_hash != data.get('ph'):
@@ -169,6 +185,7 @@ def login_required(f):
 # Route de connexion
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    _ensure_admin_support_tables()
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
@@ -185,7 +202,7 @@ def login():
 # Route de déconnexion
 @app.route('/logout')
 def logout():
-    _pop_session_resilience_analysis_upload(clear_files=True)
+    _clear_resilience_analysis_upload_for_user(_current_user_id(), clear_files=True)
     session.pop('user_id', None)
     flash("Déconnexion réussie.", "success")
     return redirect(url_for('login'))
@@ -198,6 +215,110 @@ def _current_user_id() -> int | None:
     except (TypeError, ValueError):
         return None
     return user_id if user_id > 0 else None
+
+
+def _current_user() -> User | None:
+    _ensure_admin_support_tables()
+    user_id = _current_user_id()
+    if user_id is None:
+        return None
+    return db.session.get(User, user_id)
+
+
+def _ensure_admin_support_tables():
+    global _ADMIN_SUPPORT_READY
+    if _ADMIN_SUPPORT_READY:
+        return
+
+    q_users = _qualified_ident(AUTH_SCHEMA, "users")
+    q_help = _qualified_ident(AUTH_SCHEMA, "help_content")
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": ADMIN_SUPPORT_INIT_LOCK_KEY})
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {q_users} (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL
+            )
+        """))
+        conn.execute(text(f"""
+            ALTER TABLE {q_users}
+            ADD COLUMN IF NOT EXISTS is_admin BOOLEAN
+        """))
+        conn.execute(text(f"""
+            UPDATE {q_users}
+            SET is_admin = TRUE
+            WHERE is_admin IS NULL
+        """))
+        conn.execute(text(f"""
+            ALTER TABLE {q_users}
+            ALTER COLUMN is_admin SET DEFAULT FALSE
+        """))
+        conn.execute(text(f"""
+            ALTER TABLE {q_users}
+            ALTER COLUMN is_admin SET NOT NULL
+        """))
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {q_help} (
+                page_key TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                updated_by INTEGER,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text(f"""
+            INSERT INTO {q_help} (page_key, title, body, updated_at)
+            VALUES (:page_key, :title, :body, now())
+            ON CONFLICT (page_key) DO NOTHING
+        """), {
+            "page_key": RESILIENCE_HELP_PAGE_KEY,
+            "title": DEFAULT_RESILIENCE_HELP_TITLE,
+            "body": DEFAULT_RESILIENCE_HELP_BODY,
+        })
+    _ADMIN_SUPPORT_READY = True
+
+
+def _require_admin_user() -> User:
+    _ensure_admin_support_tables()
+    user = _current_user()
+    if not user:
+        raise PermissionError("Utilisateur non authentifié.")
+    if not bool(user.is_admin):
+        raise PermissionError("Accès administrateur requis.")
+    return user
+
+
+def _resilience_help_content(conn):
+    q_help = _qualified_ident(AUTH_SCHEMA, "help_content")
+    row = conn.execute(text(f"""
+        SELECT page_key, title, body, updated_by, updated_at
+        FROM {q_help}
+        WHERE page_key = :page_key
+    """), {"page_key": RESILIENCE_HELP_PAGE_KEY}).mappings().first()
+
+    if row:
+        return {
+            "page_key": row["page_key"],
+            "title": row["title"],
+            "body": row["body"],
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+
+    return {
+        "page_key": RESILIENCE_HELP_PAGE_KEY,
+        "title": DEFAULT_RESILIENCE_HELP_TITLE,
+        "body": DEFAULT_RESILIENCE_HELP_BODY,
+        "updated_by": None,
+        "updated_at": None,
+    }
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "oui"}
 
 
 def _normalize_alea_layer_name(name: str) -> str:
@@ -265,8 +386,99 @@ def _set_session_resilience_analysis_upload(display_name: str, dataset_path: str
     }
     session.modified = True
 
+
+def _analysis_upload_registry_row_to_payload(row) -> dict | None:
+    if not row:
+        return None
+    return _sanitize_session_resilience_analysis_upload({
+        "display_name": row.get("display_name"),
+        "dataset_path": row.get("dataset_path"),
+        "staging_dir": row.get("staging_dir"),
+    })
+
+
+def _analysis_upload_registry_by_user(conn, owner_user_id: int):
+    return conn.execute(text("""
+        SELECT owner_user_id, display_name, dataset_path, staging_dir, created_at
+        FROM resilience.analysis_upload_registry
+        WHERE owner_user_id = :owner_user_id
+        LIMIT 1
+    """), {"owner_user_id": owner_user_id}).mappings().first()
+
+
+def _register_analysis_upload_registry(conn, owner_user_id: int, display_name: str, dataset_path: str, staging_dir: str):
+    previous_row = _analysis_upload_registry_by_user(conn, owner_user_id)
+    previous_upload = _analysis_upload_registry_row_to_payload(previous_row)
+    if previous_upload and previous_upload["staging_dir"] != str(staging_dir or "").strip():
+        _clear_resilience_analysis_upload_files(previous_upload)
+
+    conn.execute(text("""
+        INSERT INTO resilience.analysis_upload_registry
+            (owner_user_id, display_name, dataset_path, staging_dir, created_at)
+        VALUES
+            (:owner_user_id, :display_name, :dataset_path, :staging_dir, now())
+        ON CONFLICT (owner_user_id) DO UPDATE
+        SET display_name = EXCLUDED.display_name,
+            dataset_path = EXCLUDED.dataset_path,
+            staging_dir = EXCLUDED.staging_dir,
+            created_at = now()
+    """), {
+        "owner_user_id": owner_user_id,
+        "display_name": str(display_name or "").strip(),
+        "dataset_path": str(dataset_path or "").strip(),
+        "staging_dir": str(staging_dir or "").strip(),
+    })
+
+
+def _pop_analysis_upload_registry(conn, owner_user_id: int, clear_files: bool = True) -> dict | None:
+    row = _analysis_upload_registry_by_user(conn, owner_user_id)
+    upload = _analysis_upload_registry_row_to_payload(row)
+    conn.execute(text("""
+        DELETE FROM resilience.analysis_upload_registry
+        WHERE owner_user_id = :owner_user_id
+    """), {"owner_user_id": owner_user_id})
+    if clear_files:
+        _clear_resilience_analysis_upload_files(upload)
+    return upload
+
+
+def _clear_resilience_analysis_upload_for_user(owner_user_id: int | None, clear_files: bool = True):
+    session_upload = _pop_session_resilience_analysis_upload(clear_files=False)
+    registry_upload = None
+    if owner_user_id is not None:
+        _ensure_resilience_run_history_table()
+        with engine.begin() as conn:
+            registry_upload = _pop_analysis_upload_registry(conn, owner_user_id, clear_files=False)
+
+    if clear_files:
+        _clear_resilience_analysis_upload_files(registry_upload or session_upload)
+    return registry_upload or session_upload
+
+
+def _get_resilience_analysis_upload_for_user(owner_user_id: int | None) -> dict | None:
+    upload = _get_session_resilience_analysis_upload()
+    if upload:
+        return upload
+    if owner_user_id is None:
+        return None
+
+    _ensure_resilience_run_history_table()
+    with engine.begin() as conn:
+        row = _analysis_upload_registry_by_user(conn, owner_user_id)
+        upload = _analysis_upload_registry_row_to_payload(row)
+        if not upload:
+            return None
+        if not os.path.exists(upload["dataset_path"]):
+            _pop_analysis_upload_registry(conn, owner_user_id, clear_files=True)
+            return None
+
+    session[RESILIENCE_ANALYSIS_SESSION_KEY] = upload
+    session.modified = True
+    return upload
+
 @app.route('/forgot', methods=['GET', 'POST'])
 def forgot_password():
+    _ensure_admin_support_tables()
     # Ne pas divulguer si le compte existe ou non -> anti-enumération.
     if request.method == 'POST':
         username = (request.form.get('username') or "").strip()
@@ -5586,7 +5798,179 @@ def liste_exports():
 
 @app.route('/resilience')
 def resilience():
-    return render_template('resilience.html')
+    user = _current_user()
+    if not user:
+        return redirect(url_for('login'))
+
+    _ensure_admin_support_tables()
+    return render_template('resilience.html', resilience_context={
+        "user_id": user.id,
+        "username": user.username,
+        "is_admin": bool(user.is_admin),
+    })
+
+
+@app.route('/resilience_admin_users', methods=['GET', 'POST'])
+def resilience_admin_users():
+    try:
+        admin_user = _require_admin_user()
+    except PermissionError as exc:
+        status_code = 401 if _current_user_id() is None else 403
+        return jsonify({"status": "error", "message": str(exc)}), status_code
+
+    _ensure_admin_support_tables()
+
+    if request.method == 'GET':
+        q_users = _qualified_ident(AUTH_SCHEMA, "users")
+        with engine.begin() as conn:
+            rows = conn.execute(text(f"""
+                SELECT id, username, is_admin
+                FROM {q_users}
+                ORDER BY LOWER(username), id
+            """)).mappings().all()
+
+        return jsonify({
+            "status": "ok",
+            "users": [
+                {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "is_admin": bool(row["is_admin"]),
+                    "is_current_user": int(row["id"]) == int(admin_user.id),
+                }
+                for row in rows
+            ],
+        })
+
+    payload = request.get_json(silent=True) or request.form or {}
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    is_admin = _coerce_bool(payload.get("is_admin"))
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,50}", username):
+        return jsonify({
+            "status": "error",
+            "message": "Nom d'utilisateur invalide. Utilisez 3 à 50 caractères alphanumériques, ., _ ou -.",
+        }), 400
+    if len(password) < 8:
+        return jsonify({
+            "status": "error",
+            "message": "Le mot de passe doit contenir au moins 8 caractères.",
+        }), 400
+    if User.query.filter_by(username=username).first():
+        return jsonify({"status": "error", "message": "Ce nom d'utilisateur existe déjà."}), 409
+
+    new_user = User(username=username, is_admin=is_admin)
+    new_user.set_password(password)
+    db.session.add(new_user)
+    db.session.commit()
+
+    return jsonify({
+        "status": "ok",
+        "message": f'Utilisateur "{username}" créé.',
+        "user": {
+            "id": new_user.id,
+            "username": new_user.username,
+            "is_admin": bool(new_user.is_admin),
+            "is_current_user": False,
+        }
+    })
+
+
+@app.route('/resilience_admin_users/<int:user_id>/role', methods=['POST'])
+def resilience_admin_user_role(user_id: int):
+    try:
+        admin_user = _require_admin_user()
+    except PermissionError as exc:
+        status_code = 401 if _current_user_id() is None else 403
+        return jsonify({"status": "error", "message": str(exc)}), status_code
+
+    payload = request.get_json(silent=True) or request.form or {}
+    is_admin = _coerce_bool(payload.get("is_admin"))
+
+    target_user = db.session.get(User, user_id)
+    if not target_user:
+        return jsonify({"status": "error", "message": "Utilisateur introuvable."}), 404
+    if int(target_user.id) == int(admin_user.id):
+        return jsonify({
+            "status": "error",
+            "message": "Vous ne pouvez pas modifier votre propre rôle administrateur depuis cette page.",
+        }), 400
+
+    if not is_admin and bool(target_user.is_admin):
+        admin_count = User.query.filter_by(is_admin=True).count()
+        if admin_count <= 1:
+            return jsonify({
+                "status": "error",
+                "message": "Impossible de retirer le dernier administrateur.",
+            }), 400
+
+    target_user.is_admin = is_admin
+    db.session.commit()
+
+    return jsonify({
+        "status": "ok",
+        "message": f'Rôle mis à jour pour "{target_user.username}".',
+        "user": {
+            "id": target_user.id,
+            "username": target_user.username,
+            "is_admin": bool(target_user.is_admin),
+            "is_current_user": False,
+        }
+    })
+
+
+@app.route('/resilience_help_content', methods=['GET', 'POST'])
+def resilience_help_content():
+    _ensure_admin_support_tables()
+
+    if request.method == 'GET':
+        current_user = _current_user()
+        with engine.begin() as conn:
+            content = _resilience_help_content(conn)
+        return jsonify({
+            "status": "ok",
+            "content": content,
+            "can_edit": bool(current_user and current_user.is_admin),
+        })
+
+    try:
+        admin_user = _require_admin_user()
+    except PermissionError as exc:
+        status_code = 401 if _current_user_id() is None else 403
+        return jsonify({"status": "error", "message": str(exc)}), status_code
+
+    payload = request.get_json(silent=True) or request.form or {}
+    title = str(payload.get("title") or "").strip()
+    body = str(payload.get("body") or "").strip()
+    if not title:
+        return jsonify({"status": "error", "message": "Le titre de l'aide est obligatoire."}), 400
+    if not body:
+        return jsonify({"status": "error", "message": "Le contenu de l'aide est obligatoire."}), 400
+
+    q_help = _qualified_ident(AUTH_SCHEMA, "help_content")
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            INSERT INTO {q_help} (page_key, title, body, updated_by, updated_at)
+            VALUES (:page_key, :title, :body, :updated_by, now())
+            ON CONFLICT (page_key) DO UPDATE
+            SET title = EXCLUDED.title,
+                body = EXCLUDED.body,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = now()
+        """), {
+            "page_key": RESILIENCE_HELP_PAGE_KEY,
+            "title": title,
+            "body": body,
+            "updated_by": admin_user.id,
+        })
+        content = _resilience_help_content(conn)
+
+    return jsonify({
+        "status": "ok",
+        "message": "Documentation mise à jour.",
+        "content": content,
+    })
 
 
 @app.route('/upload_resilience', methods=['POST'])
@@ -5826,6 +6210,9 @@ def upload_resilience_analysis_layer():
         if not display_name:
             return jsonify({'status': 'error', 'message': "Nom de couche d'analyse invalide."}), 400
 
+        _ensure_resilience_run_history_table()
+        with engine.begin() as conn:
+            _register_analysis_upload_registry(conn, current_user_id, display_name, ds["path"], stage_dir)
         _set_session_resilience_analysis_upload(display_name, ds["path"], stage_dir)
         stage_dir = None
         logging.info(
@@ -5901,6 +6288,33 @@ def get_resilience_layer_data(layer_name):
         return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
 
     try:
+        requested_layer_name = str(layer_name or "").strip()
+        analysis_upload = _get_resilience_analysis_upload_for_user(current_user_id)
+        if analysis_upload and requested_layer_name == analysis_upload["display_name"]:
+            source_layer = _pick_vector_source_layer(analysis_upload["dataset_path"])
+            source_info = _inspect_vector_source(analysis_upload["dataset_path"], source_layer)
+            gdf = _read_geofile(analysis_upload["dataset_path"], layer=source_layer)
+            gdf = _prepare_resilience_gdf_for_import(
+                gdf,
+                analysis_upload["display_name"],
+                source_info["null_geometry_count"],
+            )
+            gdf = gdf.to_crs(epsg=4326)
+
+            gdf_clean = gdf.copy()
+            attr_df = gdf_clean.drop(columns='geometry').replace({pd.NA: None})
+            attr_df = attr_df.where(pd.notna(attr_df), None)
+            table_data = attr_df.fillna('').to_dict(orient='records')
+            gdf_clean[attr_df.columns] = attr_df
+            geojson = gdf_clean.__geo_interface__
+
+            return jsonify({
+                'status': 'ok',
+                'features': geojson['features'],
+                'table': table_data,
+                'columns': list(gdf_clean.columns)
+            })
+
         _ensure_resilience_run_history_table()
         with engine.begin() as conn:
             _purge_missing_private_resilience_layers(conn)
@@ -5994,7 +6408,7 @@ def get_resilience_analysis_layers():
     if current_user_id is None:
         return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
 
-    upload = _get_session_resilience_analysis_upload()
+    upload = _get_resilience_analysis_upload_for_user(current_user_id)
     if not upload:
         return jsonify([])
     return jsonify([upload["display_name"]])
@@ -6006,7 +6420,7 @@ def clear_resilience_analysis_layer():
     if current_user_id is None:
         return jsonify({'status': 'error', 'message': 'Utilisateur non authentifié.'}), 401
 
-    _pop_session_resilience_analysis_upload(clear_files=True)
+    _clear_resilience_analysis_upload_for_user(current_user_id, clear_files=True)
     return jsonify({"status": "ok"})
 
 
@@ -6540,7 +6954,12 @@ def _ensure_resilience_run_history_table():
     """
     Crée les tables de persistance des runs résilience si elles n'existent pas.
     """
+    global _RUN_HISTORY_READY
+    if _RUN_HISTORY_READY:
+        return
+
     with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": RUN_HISTORY_INIT_LOCK_KEY})
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS resilience.run_history (
                 run_id BIGSERIAL PRIMARY KEY,
@@ -6604,6 +7023,19 @@ def _ensure_resilience_run_history_table():
             ON resilience.private_analysis_layers (owner_user_id, display_name)
         """))
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS resilience.analysis_upload_registry (
+                owner_user_id INTEGER PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                dataset_path TEXT NOT NULL,
+                staging_dir TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS analysis_upload_registry_created_at_idx
+            ON resilience.analysis_upload_registry (created_at DESC)
+        """))
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS resilience.impact_matrix (
                 layer_name TEXT NOT NULL,
                 alea_level SMALLINT NOT NULL,
@@ -6641,6 +7073,7 @@ def _ensure_resilience_run_history_table():
                 "Nettoyage des anciennes couches d'analyse persistées: %s objet(s) supprimé(s).",
                 len(legacy_analysis_layers),
             )
+    _RUN_HISTORY_READY = True
 
 
 def _purge_missing_private_run_layers(conn):
@@ -7294,7 +7727,7 @@ def alea_view_batch_stream():
         temp_table = None
         try:
             _ensure_resilience_run_history_table()
-            analysis_upload = _get_session_resilience_analysis_upload()
+            analysis_upload = _get_resilience_analysis_upload_for_user(current_user_id)
             if not analysis_upload:
                 message = (
                     "Importez d'abord votre couche réseau temporaire depuis la page Analyse Réseau."

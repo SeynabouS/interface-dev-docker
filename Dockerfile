@@ -21,15 +21,15 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
-# 4) Copie le requirements AVANT l'install (assure-toi qu'il existe !)
-COPY requirements.txt ./requirements.txt
+# 4) Copie un requirements UTF-8 dédié au build Docker.
+COPY requirements.docker.txt ./requirements.docker.txt
 
 # 5) Installe les deps Python.
 #    - Pas d'upgrade pip (ça forcerait un accès à PyPI tout de suite).
 #    - Ajout de --trusted-host aussi ici (plan B si ton CA n'est pas installé).
 RUN pip install --no-cache-dir \
       --trusted-host pypi.org --trusted-host files.pythonhosted.org \
-      -r requirements.txt \
+      -r requirements.docker.txt \
   && pip install --no-cache-dir \
       --trusted-host pypi.org --trusted-host files.pythonhosted.org \
       GeoAlchemy2==0.14.7 geopandas==0.14.4 shapely==2.0.5 pyproj==3.6.1 rtree==1.3.0 requests==2.32.3 gunicorn==22.0.0

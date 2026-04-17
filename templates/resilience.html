@@ -25,11 +25,58 @@
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #475569; }
         #resilience-map { min-height: 520px; border-radius: 12px; border: 1px solid #1e293b; }
+        #resilience-map-panel { position: relative; display: flex; flex-direction: column; }
+        #resilience-map-panel:fullscreen,
+        #resilience-map-panel:-webkit-full-screen,
+        .resilience-map-panel-fallback-fullscreen {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            max-width: none;
+            margin: 0;
+            padding: 16px;
+            border-radius: 0;
+            background: #020617;
+            z-index: 2500;
+        }
+        #resilience-map-panel:fullscreen #resilience-map,
+        #resilience-map-panel:-webkit-full-screen #resilience-map,
+        .resilience-map-panel-fallback-fullscreen #resilience-map {
+            height: calc(100vh - 96px);
+            min-height: 0;
+            flex: 1 1 auto;
+        }
+        #analysis-map { height: 420px; border-radius: 12px; border: 1px solid #1e293b; }
+        #analysis-map-panel { position: relative; display: flex; flex-direction: column; }
+        #analysis-map-shell { position: relative; }
+        #analysis-map-shell .analysis-map-overlay-btn { position: absolute; top: 12px; right: 12px; z-index: 500; }
+        #analysis-map-status { min-height: 1.25rem; }
+        #analysis-map-shell:fullscreen,
+        #analysis-map-shell:-webkit-full-screen,
+        .analysis-map-shell-fallback-fullscreen {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            max-width: none;
+            margin: 0;
+            padding: 12px;
+            border-radius: 0;
+            background: #020617;
+            z-index: 2500;
+        }
+        #analysis-map-shell:fullscreen #analysis-map,
+        #analysis-map-shell:-webkit-full-screen #analysis-map,
+        .analysis-map-shell-fallback-fullscreen #analysis-map {
+            height: calc(100vh - 24px);
+            min-height: 0;
+        }
         #file-names-container > div { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 10px; }
         #file-names-container input[type="text"] { width: 100%; background: #020617; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 8px 10px; margin-top: 8px; }
-        #import-feedback, #analysis-import-feedback, #layer-action-feedback, #impact-matrix-feedback { border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 600; border: 1px solid transparent; }
-        #import-feedback.success, #analysis-import-feedback.success, #layer-action-feedback.success, #impact-matrix-feedback.success { color: #6ee7b7; background: rgba(6, 78, 59, 0.35); border-color: rgba(16, 185, 129, 0.45); }
-        #import-feedback.error, #analysis-import-feedback.error, #layer-action-feedback.error, #impact-matrix-feedback.error { color: #fca5a5; background: rgba(127, 29, 29, 0.35); border-color: rgba(239, 68, 68, 0.45); }
+        #import-feedback, #analysis-import-feedback, #layer-action-feedback, #impact-matrix-feedback, #admin-user-feedback, #help-content-feedback { border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 600; border: 1px solid transparent; }
+        #import-feedback.success, #analysis-import-feedback.success, #layer-action-feedback.success, #impact-matrix-feedback.success, #admin-user-feedback.success, #help-content-feedback.success { color: #6ee7b7; background: rgba(6, 78, 59, 0.35); border-color: rgba(16, 185, 129, 0.45); }
+        #import-feedback.error, #analysis-import-feedback.error, #layer-action-feedback.error, #impact-matrix-feedback.error, #admin-user-feedback.error, #help-content-feedback.error { color: #fca5a5; background: rgba(127, 29, 29, 0.35); border-color: rgba(239, 68, 68, 0.45); }
         .alea-support-card { 
             background: linear-gradient(135deg, rgba(15, 23, 42, 0.8) 0%, rgba(2, 6, 23, 0.9) 100%); 
             border: 1px solid #1e293b;
@@ -140,11 +187,11 @@
             padding: 20px 8px;
             font-size: 0.85rem;
         }
-        #layer-controls { max-height: 260px; overflow-y: auto; padding-right: 4px; }
-        #layer-controls > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; min-width: 0; }
-        #layer-controls label { min-width: 0; flex: 1 1 220px; overflow-wrap: anywhere; word-break: break-word; }
-        #layer-controls label strong { overflow-wrap: anywhere; word-break: break-word; }
-        #layer-controls .download-format, #layer-controls .delete-layer-btn, #layer-controls .layer-color { background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; padding: 6px 8px; }
+        #layer-controls, #analysis-map-layer-controls { max-height: 260px; overflow-y: auto; padding-right: 4px; }
+        #layer-controls > div, #analysis-map-layer-controls > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; min-width: 0; }
+        #layer-controls label, #analysis-map-layer-controls label { min-width: 0; flex: 1 1 220px; overflow-wrap: anywhere; word-break: break-word; }
+        #layer-controls label strong, #analysis-map-layer-controls label strong { overflow-wrap: anywhere; word-break: break-word; }
+        #layer-controls .download-format, #layer-controls .delete-layer-btn, #layer-controls .layer-color, #analysis-map-layer-controls .layer-color { background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; padding: 6px 8px; }
         #layer-controls .delete-layer-btn { border-color: #7f1d1d; color: #fecaca; background: rgba(127, 29, 29, 0.2); }
         #layer-controls .delete-layer-btn:hover { background: rgba(127, 29, 29, 0.4); }
         #impact-matrix-container { border: 1px solid #334155; border-radius: 12px; background: #020617; overflow: auto; max-height: 340px; }
@@ -194,7 +241,9 @@
                 <button onclick="switchTab('config')" id="nav-config" class="pb-1 border-b-2 border-brand-400 text-brand-400">Configuration</button>
                 <button onclick="switchTab('analyse')" id="nav-analyse" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Analyse Réseau</button>
                 <button onclick="switchTab('historique')" id="nav-historique" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Historique runs</button>
+                {% if resilience_context.is_admin %}
                 <button onclick="switchTab('users')" id="nav-users" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Admin. & Accès</button>
+                {% endif %}
                 <button onclick="switchTab('aide')" id="nav-aide" class="pb-1 border-b-2 border-transparent hover:text-slate-100">Aide & Doc</button>
             </div>
             <a href="{{ url_for('logout') }}" class="text-sm text-slate-500 hover:text-red-400 flex items-center gap-2">
@@ -245,14 +294,14 @@
                 </div>
 
                 <div class="w-2/3 bg-slate-950 rounded-lg border border-slate-800 flex flex-col relative overflow-hidden p-4">
-                    <div class="flex items-center gap-3 mb-3">
-                        <label for="layer-selector" class="text-sm font-medium text-slate-300">Couche affichée</label>
-                        <select id="layer-selector" class="bg-slate-900 border border-slate-700 text-slate-200 rounded p-2 text-sm min-w-[220px]"></select>
-                        <label for="color-picker" class="text-sm font-medium text-slate-300">Couleur</label>
-                        <input type="color" id="color-picker" value="#06b6d4" class="w-10 h-10 p-1 rounded border border-slate-700 bg-slate-900">
+                    <div id="resilience-map-panel" class="flex-1 flex flex-col">
+                        <div class="flex justify-end mb-3">
+                            <button type="button" id="resilience-map-fullscreen-btn" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded text-sm">
+                                Plein écran
+                            </button>
+                        </div>
+                        <div id="resilience-map" class="flex-1"></div>
                     </div>
-
-                    <div id="resilience-map" class="flex-1"></div>
 
                     <div class="mt-3 grid grid-cols-1 gap-3">
                         <section class="bg-slate-900 border border-slate-800 rounded-lg p-3">
@@ -343,6 +392,40 @@
                             <input type="text" id="alea-view-name" placeholder="ex: ma_couche_alea_view" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200">
                         </label>
                     </div>
+
+                </div>
+
+                <div id="analysis-map-panel" class="bg-slate-900 border border-slate-800 rounded-lg p-4 mt-4">
+                    <div class="flex flex-wrap justify-between items-start gap-3 mb-3">
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-100 uppercase tracking-wide">Carte d'analyse</h3>
+                            <p class="text-xs text-slate-400 mt-2">
+                                Aperçu cartographique de la couche infra importée et des runs sélectionnés par l'utilisateur.
+                                Fond de carte Positron.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div id="analysis-map-shell">
+                        <button type="button" id="analysis-map-fullscreen-btn" class="analysis-map-overlay-btn bg-slate-900/85 border border-slate-700 hover:bg-slate-800 text-slate-200 px-3 py-2 rounded text-sm">
+                            Plein écran
+                        </button>
+                        <div id="analysis-map"></div>
+                    </div>
+                    <p id="analysis-map-status" class="mt-3 text-xs text-slate-400">
+                        Importez une couche réseau temporaire pour afficher l'aperçu.
+                    </p>
+                    <div class="mt-4">
+                        <div class="alea-support-meta mb-3">
+                            <div>
+                                <h4 class="text-sm font-semibold text-slate-100 uppercase tracking-wide">Affichage cartographique</h4>
+                                <p class="text-xs text-slate-400 mt-2">
+                                    Activez l'infra importée et les runs à superposer. Les couches aléa ne sont pas affichées sur cette carte.
+                                </p>
+                            </div>
+                        </div>
+                        <div id="analysis-map-layer-controls"></div>
+                    </div>
                 </div>
 
                 <button id="alea-run-btn" class="w-full bg-brand-600 hover:bg-brand-500 text-white py-4 rounded-lg font-bold shadow-lg transition-colors text-lg">
@@ -401,38 +484,118 @@
                 </div>
             </div>
 
-            <div id="page-users" class="hidden-element w-full max-w-5xl mx-auto overflow-y-auto pb-10 h-full">
+            {% if resilience_context.is_admin %}
+            <div id="page-users" class="hidden-element w-full max-w-6xl mx-auto overflow-y-auto pb-10 h-full">
                 <h2 class="text-2xl font-semibold text-slate-100 mb-6">Administration & Utilisateurs</h2>
-                <div class="bg-slate-900 border border-slate-800 rounded-lg p-6">
-                    <p class="text-slate-400 text-sm">Espace administration prêt pour gestion des accès/rôles.</p>
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                    <section class="bg-slate-900 border border-slate-800 rounded-lg p-6">
+                        <h3 class="text-lg font-semibold text-slate-100 mb-2">Créer un utilisateur</h3>
+                        <p class="text-sm text-slate-400 mb-4">
+                            Créez un compte local et choisissez s'il dispose des droits administrateur.
+                        </p>
+                        <form id="admin-user-form" class="space-y-4">
+                            <label class="block text-sm text-slate-300">
+                                Nom d'utilisateur
+                                <input id="admin-user-username" type="text" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200" placeholder="ex: jean.dupont">
+                            </label>
+                            <label class="block text-sm text-slate-300">
+                                Mot de passe
+                                <input id="admin-user-password" type="password" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200" placeholder="8 caractères minimum">
+                            </label>
+                            <label class="flex items-center gap-2 text-sm text-slate-300 bg-slate-950/70 border border-slate-700 rounded-lg px-3 py-2">
+                                <input id="admin-user-is-admin" type="checkbox">
+                                Créer ce compte comme administrateur
+                            </label>
+                            <button type="submit" id="admin-user-submit" class="bg-brand-600 hover:bg-brand-500 text-white font-bold px-4 py-2 rounded transition-colors shadow-lg shadow-brand-500/20">
+                                Créer l'utilisateur
+                            </button>
+                        </form>
+                        <div id="admin-user-feedback" class="hidden-element mt-4"></div>
+                    </section>
+
+                    <section class="bg-slate-900 border border-slate-800 rounded-lg p-6">
+                        <h3 class="text-lg font-semibold text-slate-100 mb-2">Utilisateurs existants</h3>
+                        <p class="text-sm text-slate-400 mb-4">
+                            Activez ou retirez le rôle administrateur sur les autres comptes.
+                        </p>
+                        <div id="admin-user-list" class="space-y-3">
+                            <em class="text-slate-500 not-italic">Chargement des utilisateurs...</em>
+                        </div>
+                    </section>
                 </div>
             </div>
+            {% endif %}
 
             <div id="page-aide" class="hidden-element w-full max-w-4xl mx-auto overflow-y-auto pb-10 h-full">
-                <h2 class="text-3xl font-semibold text-slate-100 mb-6">Manuel d'utilisation SippeRésiste</h2>
-                <div class="bg-slate-900 border border-slate-800 rounded-lg p-8 shadow-lg space-y-3 text-sm text-slate-300">
-                    <p>1. Configuration: importer les couches et contrôler leur affichage cartographique.</p>
-                    <p>2. Analyse Réseau: sélectionner les couches aléa (injection de stress), puis initier le calcul de résilience.</p>
-                    <p>3. Résultats: suivre le log, récupérer les exports CSV/GPKG/SHP et consulter la table attributaire.</p>
+                <h2 id="help-page-title" class="text-3xl font-semibold text-slate-100 mb-6">Aide & Documentation</h2>
+                <div class="bg-slate-900 border border-slate-800 rounded-lg p-8 shadow-lg">
+                    <div id="help-page-body" class="space-y-3 text-sm text-slate-300">
+                        <em class="text-slate-500 not-italic">Chargement de la documentation...</em>
+                    </div>
                 </div>
+                {% if resilience_context.is_admin %}
+                <div class="bg-slate-900 border border-slate-800 rounded-lg p-6 mt-6">
+                    <h3 class="text-lg font-semibold text-slate-100 mb-2">Édition admin de l'aide</h3>
+                    <p class="text-sm text-slate-400 mb-4">
+                        Cette version sera visible par tous les utilisateurs de l'application Résilience.
+                    </p>
+                    <form id="help-content-form" class="space-y-4">
+                        <label class="block text-sm text-slate-300">
+                            Titre
+                            <input id="help-content-title-input" type="text" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200">
+                        </label>
+                        <label class="block text-sm text-slate-300">
+                            Contenu
+                            <textarea id="help-content-body-input" rows="12" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-3 text-slate-200"></textarea>
+                        </label>
+                        <button type="submit" id="help-content-save-btn" class="bg-brand-600 hover:bg-brand-500 text-white font-bold px-4 py-2 rounded transition-colors shadow-lg shadow-brand-500/20">
+                            Enregistrer la documentation
+                        </button>
+                    </form>
+                    <div id="help-content-feedback" class="hidden-element mt-4"></div>
+                </div>
+                {% endif %}
             </div>
         </main>
     </div>
 
     <script>
+        window.RESILIENCE_CONTEXT = {{ resilience_context|tojson }};
+
         function switchTab(tabName) {
-            ['config', 'analyse', 'historique', 'users', 'aide'].forEach(name => {
-                document.getElementById('page-' + name).classList.add('hidden-element');
-                document.getElementById('nav-' + name).className = "pb-1 border-b-2 border-transparent hover:text-slate-100";
+            const tabs = ['config', 'analyse', 'historique', 'aide'];
+            if (window.RESILIENCE_CONTEXT && window.RESILIENCE_CONTEXT.is_admin) {
+                tabs.splice(3, 0, 'users');
+            }
+            if (!tabs.includes(tabName)) {
+                tabName = 'config';
+            }
+
+            tabs.forEach(name => {
+                const page = document.getElementById('page-' + name);
+                const nav = document.getElementById('nav-' + name);
+                if (page) page.classList.add('hidden-element');
+                if (nav) nav.className = "pb-1 border-b-2 border-transparent hover:text-slate-100";
             });
-            document.getElementById('page-' + tabName).classList.remove('hidden-element');
-            document.getElementById('nav-' + tabName).className = "pb-1 border-b-2 border-brand-400 text-brand-400";
+            const activePage = document.getElementById('page-' + tabName);
+            const activeNav = document.getElementById('nav-' + tabName);
+            if (activePage) activePage.classList.remove('hidden-element');
+            if (activeNav) activeNav.className = "pb-1 border-b-2 border-brand-400 text-brand-400";
 
             if (tabName === 'config' && window.__resilienceMap) {
                 setTimeout(() => window.__resilienceMap.invalidateSize(), 120);
             }
+            if (tabName === 'analyse' && window.__analysisMap) {
+                setTimeout(() => window.__analysisMap.invalidateSize(), 120);
+            }
             if (tabName === 'historique' && typeof window.loadResilienceHistory === 'function') {
                 window.loadResilienceHistory();
+            }
+            if (tabName === 'users' && typeof window.loadResilienceAdminUsers === 'function') {
+                window.loadResilienceAdminUsers();
+            }
+            if (tabName === 'aide' && typeof window.loadResilienceHelpContent === 'function') {
+                window.loadResilienceHelpContent();
             }
         }
 
@@ -441,6 +604,6 @@
         });
     </script>
 
-    <script src="{{ url_for('static', filename='js/resilience.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/resilience.js', v='20260410-admin-roles-help') }}"></script>
 </body>
 </html>
