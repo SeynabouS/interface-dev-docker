@@ -5,7 +5,6 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     dockerCommand: gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 0 --graceful-timeout 300 app_resilience:app
-    preDeployCommand: python scripts/init_render_db.py
     envVars:
       - key: SECRET_KEY
         generateValue: true

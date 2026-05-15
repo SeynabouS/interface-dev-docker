@@ -43,7 +43,7 @@ Le fichier `render.yaml` permet de creer:
 - une base Postgres `sipperesiste-resilience-db`
 - les variables d'environnement necessaires a l'application
 
-Le script `scripts/init_render_db.py` active PostGIS et cree le schema `resilience` pendant le deploiement.
+L'application active PostGIS et cree le schema `resilience` automatiquement au premier acces.
 
 ## Render manuel
 

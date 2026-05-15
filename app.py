@@ -277,10 +277,13 @@ def _ensure_admin_support_tables():
     if _ADMIN_SUPPORT_READY:
         return
 
-    q_users = _qualified_ident(AUTH_SCHEMA, "users")
-    q_help = _qualified_ident(AUTH_SCHEMA, "help_content")
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": ADMIN_SUPPORT_INIT_LOCK_KEY})
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(AUTH_SCHEMA)}"))
+
+        q_users = _qualified_ident(AUTH_SCHEMA, "users")
+        q_help = _qualified_ident(AUTH_SCHEMA, "help_content")
         conn.execute(text(f"""
             CREATE TABLE IF NOT EXISTS {q_users} (
                 id SERIAL PRIMARY KEY,
