@@ -70,11 +70,17 @@ document.addEventListener('DOMContentLoaded', function () {
     const adminUserFeedback = document.getElementById('admin-user-feedback');
     const helpPageTitle = document.getElementById('help-page-title');
     const helpPageBody = document.getElementById('help-page-body');
-    const helpContentForm = document.getElementById('help-content-form');
-    const helpContentTitleInput = document.getElementById('help-content-title-input');
-    const helpContentBodyInput = document.getElementById('help-content-body-input');
-    const helpContentSaveBtn = document.getElementById('help-content-save-btn');
-    const helpContentFeedback = document.getElementById('help-content-feedback');
+    const helpDocumentPanel = document.getElementById('help-document-panel');
+    const helpDocumentMeta = document.getElementById('help-document-meta');
+    const helpDocumentPreviewLink = document.getElementById('help-document-preview-link');
+    const helpDocumentDownloadLink = document.getElementById('help-document-download-link');
+    const helpDocumentPreviewShell = document.getElementById('help-document-preview-shell');
+    const helpDocumentPreviewFrame = document.getElementById('help-document-preview-frame');
+    const helpDocumentForm = document.getElementById('help-document-form');
+    const helpDocumentFileInput = document.getElementById('help-document-file');
+    const helpDocumentUploadBtn = document.getElementById('help-document-upload-btn');
+    const helpDocumentDeleteBtn = document.getElementById('help-document-delete-btn');
+    const helpDocumentFeedback = document.getElementById('help-document-feedback');
     const selectedRunIds = new Set();
     let historySearchTimer = null;
     const importFeedback = document.getElementById('import-feedback');
@@ -86,7 +92,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const impactMatrixFeedback = document.getElementById('impact-matrix-feedback');
     let impactMatrixFeedbackTimer = null;
     let adminUserFeedbackTimer = null;
-    let helpContentFeedbackTimer = null;
+    let helpDocumentFeedbackTimer = null;
     let analysisMapLayerStore = {};
     let analysisMapRefreshToken = 0;
     let analysisMapRefreshTimer = null;
@@ -632,6 +638,14 @@ document.addEventListener('DOMContentLoaded', function () {
         return `<span class="bg-slate-800 border border-slate-700 text-slate-300 px-2 py-1 rounded text-xs font-medium">${escapeHtml(status || 'Inconnu')}</span>`;
     }
 
+    function formatFileSize(bytes) {
+        const value = Number(bytes || 0);
+        if (!Number.isFinite(value) || value <= 0) return '0 octet';
+        if (value < 1024) return `${value} octets`;
+        if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} Ko`;
+        return `${(value / (1024 * 1024)).toFixed(1)} Mo`;
+    }
+
     function helpBodyToHtml(body) {
         const raw = String(body || '').trim();
         if (!raw) {
@@ -654,11 +668,76 @@ document.addEventListener('DOMContentLoaded', function () {
         if (helpPageBody) {
             helpPageBody.innerHTML = helpBodyToHtml(safeContent.body);
         }
-        if (helpContentTitleInput) {
-            helpContentTitleInput.value = safeContent.title || '';
+    }
+
+    function renderHelpDocument(documentInfo) {
+        if (!helpDocumentPanel || !helpDocumentMeta) return;
+
+        const doc = documentInfo || null;
+        if (!doc) {
+            helpDocumentMeta.innerHTML = '<em class="text-slate-500 not-italic">Aucun document de référence disponible.</em>';
+            if (helpDocumentPreviewLink) {
+                helpDocumentPreviewLink.href = '#';
+                helpDocumentPreviewLink.classList.add('hidden-element');
+            }
+            if (helpDocumentDownloadLink) {
+                helpDocumentDownloadLink.href = '#';
+                helpDocumentDownloadLink.classList.add('hidden-element');
+            }
+            if (helpDocumentPreviewFrame) {
+                helpDocumentPreviewFrame.removeAttribute('src');
+            }
+            if (helpDocumentPreviewShell) {
+                helpDocumentPreviewShell.classList.add('hidden-element');
+            }
+            return;
         }
-        if (helpContentBodyInput) {
-            helpContentBodyInput.value = safeContent.body || '';
+
+        const uploadedAt = formatRunDate(doc.uploaded_at);
+        const previewMode = String(doc.preview_mode || 'none');
+        let previewNote = 'Prévisualisation indisponible pour ce format.';
+        if (previewMode === 'pdf') {
+            previewNote = 'Prévisualisation PDF intégrée et téléchargement disponibles.';
+        } else if (previewMode === 'word_pdf') {
+            previewNote = 'Prévisualisation générée à partir du document Word via conversion PDF serveur.';
+        }
+
+        helpDocumentMeta.innerHTML = `
+            <div class="space-y-2">
+                <div><strong class="text-slate-100">${escapeHtml(doc.original_filename || 'Document sans nom')}</strong></div>
+                <div class="text-slate-400">Format : ${escapeHtml(String(doc.file_ext || '').toUpperCase().replace('.', '')) || '-'}</div>
+                <div class="text-slate-400">Taille : ${escapeHtml(formatFileSize(doc.file_size))}</div>
+                <div class="text-slate-400">Dernière mise à jour : ${escapeHtml(uploadedAt)}</div>
+                <div class="text-slate-400">${escapeHtml(previewNote)}</div>
+            </div>
+        `;
+
+        if (helpDocumentDownloadLink) {
+            helpDocumentDownloadLink.href = doc.download_url || '#';
+            helpDocumentDownloadLink.classList.remove('hidden-element');
+        }
+
+        const previewHref = doc.preview_url
+            ? `${doc.preview_url}${doc.preview_url.includes('?') ? '&' : '?'}ts=${encodeURIComponent(doc.uploaded_at || Date.now())}`
+            : '#';
+        if (helpDocumentPreviewLink) {
+            if (doc.preview_available && doc.preview_url) {
+                helpDocumentPreviewLink.href = previewHref;
+                helpDocumentPreviewLink.classList.remove('hidden-element');
+            } else {
+                helpDocumentPreviewLink.href = '#';
+                helpDocumentPreviewLink.classList.add('hidden-element');
+            }
+        }
+
+        if (helpDocumentPreviewShell && helpDocumentPreviewFrame) {
+            if (doc.preview_available && doc.preview_url) {
+                helpDocumentPreviewFrame.src = previewHref;
+                helpDocumentPreviewShell.classList.remove('hidden-element');
+            } else {
+                helpDocumentPreviewFrame.removeAttribute('src');
+                helpDocumentPreviewShell.classList.add('hidden-element');
+            }
         }
     }
 
@@ -853,7 +932,6 @@ document.addEventListener('DOMContentLoaded', function () {
         if (timerName === 'layer' && layerActionFeedbackTimer) clearTimeout(layerActionFeedbackTimer);
         if (timerName === 'impact' && impactMatrixFeedbackTimer) clearTimeout(impactMatrixFeedbackTimer);
         if (timerName === 'admin' && adminUserFeedbackTimer) clearTimeout(adminUserFeedbackTimer);
-        if (timerName === 'help' && helpContentFeedbackTimer) clearTimeout(helpContentFeedbackTimer);
 
         element.classList.remove('hidden-element', 'success', 'error');
         element.classList.add(type === 'error' ? 'error' : 'success');
@@ -868,7 +946,6 @@ document.addEventListener('DOMContentLoaded', function () {
         if (timerName === 'layer') layerActionFeedbackTimer = timer;
         if (timerName === 'impact') impactMatrixFeedbackTimer = timer;
         if (timerName === 'admin') adminUserFeedbackTimer = timer;
-        if (timerName === 'help') helpContentFeedbackTimer = timer;
     }
 
     function showImportFeedback(message, type = 'success') {
@@ -891,8 +968,15 @@ document.addEventListener('DOMContentLoaded', function () {
         showFeedback(adminUserFeedback, 'admin', message, type, 7000);
     }
 
-    function showHelpContentFeedback(message, type = 'success') {
-        showFeedback(helpContentFeedback, 'help', message, type, 7000);
+    function showHelpDocumentFeedback(message, type = 'success') {
+        if (helpDocumentFeedbackTimer) clearTimeout(helpDocumentFeedbackTimer);
+        if (!helpDocumentFeedback) return;
+        helpDocumentFeedback.classList.remove('hidden-element', 'success', 'error');
+        helpDocumentFeedback.classList.add(type === 'error' ? 'error' : 'success');
+        helpDocumentFeedback.textContent = message;
+        helpDocumentFeedbackTimer = setTimeout(() => {
+            helpDocumentFeedback.classList.add('hidden-element');
+        }, 7000);
     }
 
     function loadResilienceAdminUsers() {
@@ -923,12 +1007,14 @@ document.addEventListener('DOMContentLoaded', function () {
                     throw new Error(data.message || `HTTP ${response.status}`);
                 }
                 renderHelpContent(data.content || {});
+                renderHelpDocument(data.document || null);
                 return data.content || {};
             })
             .catch((error) => {
                 if (helpPageBody) {
                     helpPageBody.innerHTML = `<em class="text-red-400 not-italic">Erreur de chargement: ${escapeHtml(error.message)}</em>`;
                 }
+                renderHelpDocument(null);
                 return null;
             });
     }
@@ -1493,33 +1579,71 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    if (helpContentForm) {
-        helpContentForm.addEventListener('submit', (event) => {
+    if (helpDocumentForm) {
+        helpDocumentForm.addEventListener('submit', (event) => {
             event.preventDefault();
             if (!isAdminUser) return;
 
-            const title = String((helpContentTitleInput && helpContentTitleInput.value) || '').trim();
-            const body = String((helpContentBodyInput && helpContentBodyInput.value) || '').trim();
+            const file = helpDocumentFileInput && helpDocumentFileInput.files ? helpDocumentFileInput.files[0] : null;
+            if (!file) {
+                showHelpDocumentFeedback('Sélectionnez un fichier PDF, DOC ou DOCX.', 'error');
+                return;
+            }
 
-            helpContentSaveBtn.disabled = true;
-            fetch('/resilience_help_content', {
+            const formData = new FormData();
+            formData.append('file', file);
+            helpDocumentUploadBtn.disabled = true;
+
+            fetch('/resilience_help_document', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title, body })
+                body: formData,
             })
                 .then(async (response) => {
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok || data.status !== 'ok') {
                         throw new Error(data.message || `HTTP ${response.status}`);
                     }
-                    renderHelpContent(data.content || {});
-                    showHelpContentFeedback(data.message || 'Documentation mise à jour.', 'success');
+                    renderHelpDocument(data.document || null);
+                    if (helpDocumentFileInput) {
+                        helpDocumentFileInput.value = '';
+                    }
+                    showHelpDocumentFeedback(data.message || 'Document importé.', 'success');
                 })
                 .catch((error) => {
-                    showHelpContentFeedback(`Erreur: ${error.message}`, 'error');
+                    showHelpDocumentFeedback(`Erreur: ${error.message}`, 'error');
                 })
                 .finally(() => {
-                    helpContentSaveBtn.disabled = false;
+                    helpDocumentUploadBtn.disabled = false;
+                });
+        });
+    }
+
+    if (helpDocumentDeleteBtn) {
+        helpDocumentDeleteBtn.addEventListener('click', () => {
+            if (!isAdminUser) return;
+            if (!confirm("Supprimer le document de référence actuel ?")) {
+                return;
+            }
+
+            helpDocumentDeleteBtn.disabled = true;
+            fetch('/resilience_help_document', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+                .then(async (response) => {
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok || data.status !== 'ok') {
+                        throw new Error(data.message || `HTTP ${response.status}`);
+                    }
+                    renderHelpDocument(null);
+                    showHelpDocumentFeedback(data.message || 'Document supprimé.', 'success');
+                })
+                .catch((error) => {
+                    showHelpDocumentFeedback(`Erreur: ${error.message}`, 'error');
+                })
+                .finally(() => {
+                    helpDocumentDeleteBtn.disabled = false;
                 });
         });
     }

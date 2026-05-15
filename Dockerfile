@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     proj-bin proj-data libproj-dev \
     libgeos-dev \
     libpq-dev \
+    libreoffice-writer \
+    fonts-dejavu-core \
     ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
 

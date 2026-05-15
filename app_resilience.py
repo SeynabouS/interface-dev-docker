@@ -19,6 +19,9 @@ RESILIENCE_EXACT_PATHS = {
     "/resilience",
     "/resilience_admin_users",
     "/resilience_help_content",
+    "/resilience_help_document",
+    "/resilience_help_document_preview",
+    "/resilience_help_document_download",
     "/upload_resilience",
     "/upload_resilience_analysis_layer",
     "/resilience_layers",
@@ -34,6 +37,9 @@ RESILIENCE_EXACT_PATHS = {
 }
 RESILIENCE_PREFIX_PATHS = (
     "/resilience_admin_users/",
+    "/resilience_help_document/",
+    "/resilience_help_document_preview/",
+    "/resilience_help_document_download/",
     "/resilience_layer_data/",
     "/resilience_dependencies/",
     "/download_resilience_layer/",

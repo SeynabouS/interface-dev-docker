@@ -74,9 +74,9 @@
         }
         #file-names-container > div { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 10px; }
         #file-names-container input[type="text"] { width: 100%; background: #020617; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 8px 10px; margin-top: 8px; }
-        #import-feedback, #analysis-import-feedback, #layer-action-feedback, #impact-matrix-feedback, #admin-user-feedback, #help-content-feedback { border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 600; border: 1px solid transparent; }
-        #import-feedback.success, #analysis-import-feedback.success, #layer-action-feedback.success, #impact-matrix-feedback.success, #admin-user-feedback.success, #help-content-feedback.success { color: #6ee7b7; background: rgba(6, 78, 59, 0.35); border-color: rgba(16, 185, 129, 0.45); }
-        #import-feedback.error, #analysis-import-feedback.error, #layer-action-feedback.error, #impact-matrix-feedback.error, #admin-user-feedback.error, #help-content-feedback.error { color: #fca5a5; background: rgba(127, 29, 29, 0.35); border-color: rgba(239, 68, 68, 0.45); }
+        #import-feedback, #analysis-import-feedback, #layer-action-feedback, #impact-matrix-feedback, #admin-user-feedback, #help-document-feedback { border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 600; border: 1px solid transparent; }
+        #import-feedback.success, #analysis-import-feedback.success, #layer-action-feedback.success, #impact-matrix-feedback.success, #admin-user-feedback.success, #help-document-feedback.success { color: #6ee7b7; background: rgba(6, 78, 59, 0.35); border-color: rgba(16, 185, 129, 0.45); }
+        #import-feedback.error, #analysis-import-feedback.error, #layer-action-feedback.error, #impact-matrix-feedback.error, #admin-user-feedback.error, #help-document-feedback.error { color: #fca5a5; background: rgba(127, 29, 29, 0.35); border-color: rgba(239, 68, 68, 0.45); }
         .alea-support-card { 
             background: linear-gradient(135deg, rgba(15, 23, 42, 0.8) 0%, rgba(2, 6, 23, 0.9) 100%); 
             border: 1px solid #1e293b;
@@ -225,6 +225,8 @@
         #table-container thead th { position: sticky; top: 0; z-index: 3; background: #0b1220; }
         #table-container tbody tr:nth-child(even) { background: #0f172a; }
         #table-container tbody tr:hover { background: rgba(6, 182, 212, 0.12); }
+        #help-document-preview-frame { width: 100%; min-height: 70vh; border: 1px solid #1e293b; border-radius: 12px; background: #020617; }
+        #help-document-meta { line-height: 1.5; }
     </style>
 </head>
 <body class="bg-slate-950 font-sans text-slate-300 min-h-screen flex flex-col overflow-x-hidden">
@@ -526,33 +528,46 @@
             </div>
             {% endif %}
 
-            <div id="page-aide" class="hidden-element w-full max-w-4xl mx-auto overflow-y-auto pb-10 h-full">
-                <h2 id="help-page-title" class="text-3xl font-semibold text-slate-100 mb-6">Aide & Documentation</h2>
-                <div class="bg-slate-900 border border-slate-800 rounded-lg p-8 shadow-lg">
-                    <div id="help-page-body" class="space-y-3 text-sm text-slate-300">
-                        <em class="text-slate-500 not-italic">Chargement de la documentation...</em>
+            <div id="page-aide" class="hidden-element w-full max-w-5xl mx-auto overflow-y-auto pb-10 h-full">
+                <div id="help-document-panel" class="bg-slate-900 border border-slate-800 rounded-lg p-6 mt-6">
+                    <div class="flex flex-wrap justify-between items-start gap-4">
+                        <div>
+                            <h3 class="text-lg font-semibold text-slate-100 mb-2">Documentation utilisateur</h3>
+                            <p class="text-sm text-slate-400">Document mis à disposition par l'administrateur pour les utilisateurs.</p>
+                        </div>
+                        <div id="help-document-actions" class="flex flex-wrap gap-3">
+                            <a id="help-document-preview-link" class="hidden-element bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded text-sm" href="#" target="_blank" rel="noopener">Ouvrir la prévisualisation</a>
+                            <a id="help-document-download-link" class="hidden-element bg-brand-600 hover:bg-brand-500 text-white font-bold px-4 py-2 rounded text-sm" href="#">Télécharger</a>
+                        </div>
+                    </div>
+                    <div id="help-document-meta" class="text-sm text-slate-300 mt-4">
+                        <em class="text-slate-500 not-italic">Aucun document de référence disponible.</em>
+                    </div>
+                    <div id="help-document-preview-shell" class="hidden-element mt-5">
+                        <iframe id="help-document-preview-frame" title="Prévisualisation du document de référence"></iframe>
                     </div>
                 </div>
                 {% if resilience_context.is_admin %}
                 <div class="bg-slate-900 border border-slate-800 rounded-lg p-6 mt-6">
-                    <h3 class="text-lg font-semibold text-slate-100 mb-2">Édition admin de l'aide</h3>
+                    <h3 class="text-lg font-semibold text-slate-100 mb-2">Document admin à diffuser</h3>
                     <p class="text-sm text-slate-400 mb-4">
-                        Cette version sera visible par tous les utilisateurs de l'application Résilience.
+                        Importez un document PDF ou Word pour les utilisateurs. Un nouvel import remplace immédiatement la version précédente. Pour une prévisualisation fidèle dans l'application, privilégiez un PDF.
                     </p>
-                    <form id="help-content-form" class="space-y-4">
+                    <form id="help-document-form" class="space-y-4" enctype="multipart/form-data">
                         <label class="block text-sm text-slate-300">
-                            Titre
-                            <input id="help-content-title-input" type="text" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200">
+                            Fichier PDF, DOC ou DOCX
+                            <input id="help-document-file" type="file" accept=".pdf,.doc,.docx" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-200">
                         </label>
-                        <label class="block text-sm text-slate-300">
-                            Contenu
-                            <textarea id="help-content-body-input" rows="12" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded p-3 text-slate-200"></textarea>
-                        </label>
-                        <button type="submit" id="help-content-save-btn" class="bg-brand-600 hover:bg-brand-500 text-white font-bold px-4 py-2 rounded transition-colors shadow-lg shadow-brand-500/20">
-                            Enregistrer la documentation
-                        </button>
+                        <div class="flex flex-wrap gap-3">
+                            <button type="submit" id="help-document-upload-btn" class="bg-brand-600 hover:bg-brand-500 text-white font-bold px-4 py-2 rounded transition-colors shadow-lg shadow-brand-500/20">
+                                Importer / Remplacer le document
+                            </button>
+                            <button type="button" id="help-document-delete-btn" class="bg-red-950/70 border border-red-900 hover:bg-red-900/70 text-red-200 px-4 py-2 rounded text-sm">
+                                Supprimer le document
+                            </button>
+                        </div>
                     </form>
-                    <div id="help-content-feedback" class="hidden-element mt-4"></div>
+                    <div id="help-document-feedback" class="hidden-element mt-4"></div>
                 </div>
                 {% endif %}
             </div>

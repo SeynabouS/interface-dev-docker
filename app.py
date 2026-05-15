@@ -38,6 +38,8 @@ from flask import jsonify, request
 import re
 import shutil
 import subprocess
+import html
+from pathlib import Path
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from dotenv import load_dotenv
 from sqlalchemy.sql.elements import quoted_name as sa_quoted_name
@@ -64,6 +66,8 @@ DEFAULT_RESILIENCE_HELP_BODY = (
     "4. Admin. & Accès: créer des comptes et définir les droits administrateur.\n\n"
     "5. Aide & Doc: maintenir la documentation visible par les utilisateurs."
 )
+RESILIENCE_HELP_DOCUMENT_EXTS = {".pdf", ".doc", ".docx"}
+RESILIENCE_HELP_DOCUMENT_MAX_BYTES = 25 * 1024 * 1024
 
 # --- Options app ---
 app.config['RESET_LINK_VIA_UI'] = os.getenv('RESET_LINK_VIA_UI', '0') == '1'
@@ -103,6 +107,20 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000")
 _KEY_COLUMN_CACHE: dict[tuple[str, str], str | None] = {}
 _ADMIN_SUPPORT_READY = False
 _RUN_HISTORY_READY = False
+PUBLIC_EXACT_PATHS = {
+    "/healthz",
+    "/login",
+    "/logout",
+    "/forgot",
+}
+PUBLIC_PREFIX_PATHS = (
+    "/reset/",
+    "/image/",
+)
+PUBLIC_STATIC_PREFIX_PATHS = (
+    "/static/css/",
+    "/static/js/",
+)
 
 def _quote_ident(identifier: str) -> str:
     """
@@ -116,6 +134,35 @@ def _quote_ident(identifier: str) -> str:
 
 def _qualified_ident(schema: str, name: str) -> str:
     return f"{_quote_ident(schema)}.{_quote_ident(name)}"
+
+
+def _is_public_path(path: str) -> bool:
+    if path in PUBLIC_EXACT_PATHS:
+        return True
+    if any(path.startswith(prefix) for prefix in PUBLIC_PREFIX_PATHS):
+        return True
+    return any(path.startswith(prefix) for prefix in PUBLIC_STATIC_PREFIX_PATHS)
+
+
+def _wants_json_auth_response() -> bool:
+    if request.is_json:
+        return True
+    best = request.accept_mimetypes.best
+    return best == "application/json" and (
+        request.accept_mimetypes["application/json"]
+        >= request.accept_mimetypes["text/html"]
+    )
+
+
+@app.before_request
+def require_authenticated_user():
+    if _is_public_path(request.path):
+        return None
+    if _current_user_id() is not None:
+        return None
+    if _wants_json_auth_response():
+        return jsonify({"status": "error", "message": "Utilisateur non authentifié."}), 401
+    return redirect(url_for("login"))
 
 
 @app.get("/healthz")
@@ -177,7 +224,7 @@ def load_user_from_token(token, max_age_seconds=3600):
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
+        if _current_user_id() is None:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -268,6 +315,20 @@ def _ensure_admin_support_tables():
             )
         """))
         conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {_help_documents_table_ident()} (
+                page_key TEXT PRIMARY KEY,
+                original_filename TEXT NOT NULL,
+                stored_filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_ext TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                file_size BIGINT NOT NULL DEFAULT 0,
+                preview_text TEXT,
+                uploaded_by INTEGER,
+                uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text(f"""
             INSERT INTO {q_help} (page_key, title, body, updated_at)
             VALUES (:page_key, :title, :body, now())
             ON CONFLICT (page_key) DO NOTHING
@@ -312,6 +373,284 @@ def _resilience_help_content(conn):
         "body": DEFAULT_RESILIENCE_HELP_BODY,
         "updated_by": None,
         "updated_at": None,
+    }
+
+
+def _resilience_help_document_root() -> str:
+    root = os.path.join(os.getcwd(), "uploads", "resilience_help_docs")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _help_documents_table_ident() -> str:
+    return _qualified_ident(AUTH_SCHEMA, "help_documents")
+
+
+def _normalize_resilience_help_document_ext(filename: str) -> str:
+    ext = os.path.splitext(str(filename or ""))[1].lower().strip()
+    if ext not in RESILIENCE_HELP_DOCUMENT_EXTS:
+        raise ValueError("Formats acceptés : PDF, DOC ou DOCX.")
+    return ext
+
+
+def _resilience_help_document_mimetype(ext: str) -> str:
+    if ext == ".pdf":
+        return "application/pdf"
+    if ext == ".docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if ext == ".doc":
+        return "application/msword"
+    return "application/octet-stream"
+
+
+def _resilience_help_preview_root() -> str:
+    root = os.path.join(_resilience_help_document_root(), "_previews")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _resilience_help_preview_pdf_path(document: dict | None) -> str:
+    stored_filename = str((document or {}).get("stored_filename") or "").strip()
+    if not stored_filename:
+        file_path = str((document or {}).get("file_path") or "").strip()
+        stored_filename = os.path.basename(file_path)
+    base_name = os.path.splitext(stored_filename)[0]
+    return os.path.join(_resilience_help_preview_root(), f"{base_name}.pdf")
+
+
+def _resilience_help_office_converter_bin() -> str | None:
+    return shutil.which("soffice") or shutil.which("libreoffice")
+
+
+def _resilience_help_word_preview_supported() -> bool:
+    return bool(_resilience_help_office_converter_bin())
+
+
+def _generate_resilience_help_preview_pdf(source_path: str, output_pdf_path: str):
+    soffice_bin = _resilience_help_office_converter_bin()
+    if not soffice_bin:
+        raise RuntimeError("Le convertisseur LibreOffice n'est pas disponible sur le serveur.")
+
+    out_dir = tempfile.mkdtemp(prefix="resilience_help_pdf_")
+    profile_dir = tempfile.mkdtemp(prefix="resilience_help_lo_")
+    generated_pdf = os.path.join(
+        out_dir,
+        f"{os.path.splitext(os.path.basename(source_path))[0]}.pdf",
+    )
+    try:
+        subprocess.run(
+            [
+                soffice_bin,
+                "--headless",
+                f"-env:UserInstallation={Path(profile_dir).resolve().as_uri()}",
+                "--convert-to",
+                "pdf:writer_pdf_Export",
+                "--outdir",
+                out_dir,
+                source_path,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+        )
+        if not os.path.isfile(generated_pdf):
+            raise RuntimeError("Le PDF de prévisualisation n'a pas été généré.")
+        os.makedirs(os.path.dirname(output_pdf_path), exist_ok=True)
+        shutil.move(generated_pdf, output_pdf_path)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("La conversion Word vers PDF a dépassé le délai autorisé.") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr_text = (exc.stderr or b"").decode("utf-8", errors="ignore").strip()
+        stdout_text = (exc.stdout or b"").decode("utf-8", errors="ignore").strip()
+        detail = stderr_text or stdout_text or "erreur LibreOffice inconnue"
+        raise RuntimeError(f"Conversion Word vers PDF impossible : {detail}") from exc
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+
+def _ensure_resilience_help_preview_pdf(document: dict | None, force_refresh: bool = False) -> str:
+    source_path = str((document or {}).get("file_path") or "").strip()
+    ext = str((document or {}).get("file_ext") or "").lower().strip()
+    if not source_path or ext not in {".doc", ".docx"}:
+        raise RuntimeError("Le document fourni n'est pas un fichier Word convertible.")
+
+    output_pdf_path = _resilience_help_preview_pdf_path(document)
+    if not force_refresh and os.path.isfile(output_pdf_path):
+        return output_pdf_path
+
+    _generate_resilience_help_preview_pdf(source_path, output_pdf_path)
+    return output_pdf_path
+
+
+def _store_resilience_help_document(uploaded_file, uploaded_by: int | None) -> dict:
+    original_filename = os.path.basename(uploaded_file.filename or "").strip()
+    if not original_filename:
+        raise ValueError("Aucun document fourni.")
+
+    safe_name = secure_filename(original_filename)
+    if not safe_name:
+        raise ValueError("Nom de fichier invalide.")
+
+    ext = _normalize_resilience_help_document_ext(safe_name)
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    stored_filename = f"resilience_manual_{timestamp}{ext}"
+    target_dir = _resilience_help_document_root()
+    target_path = os.path.join(target_dir, stored_filename)
+    uploaded_file.save(target_path)
+
+    file_size = os.path.getsize(target_path)
+    if file_size <= 0:
+        _delete_resilience_help_document_file({"file_path": target_path})
+        raise ValueError("Le document importé est vide.")
+    if file_size > RESILIENCE_HELP_DOCUMENT_MAX_BYTES:
+        _delete_resilience_help_document_file({"file_path": target_path})
+        raise ValueError("Le document dépasse la taille maximale autorisée (25 Mo).")
+
+    document_meta = {
+        "stored_filename": stored_filename,
+        "file_path": target_path,
+        "file_ext": ext,
+    }
+    if ext in {".doc", ".docx"}:
+        try:
+            _ensure_resilience_help_preview_pdf(document_meta, force_refresh=True)
+        except Exception as exc:
+            _delete_resilience_help_document_file(document_meta)
+            raise ValueError(
+                "Impossible de générer une prévisualisation fidèle du document Word. "
+                "Essayez d'importer un PDF ou réexportez votre document Word."
+            ) from exc
+
+    return {
+        "page_key": RESILIENCE_HELP_PAGE_KEY,
+        "original_filename": original_filename,
+        "stored_filename": stored_filename,
+        "file_path": target_path,
+        "file_ext": ext,
+        "mime_type": _resilience_help_document_mimetype(ext),
+        "file_size": file_size,
+        "preview_text": "",
+        "uploaded_by": uploaded_by,
+        "uploaded_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _delete_resilience_help_document_file(document: dict | None):
+    path = str((document or {}).get("file_path") or "").strip()
+    preview_pdf_path = ""
+    try:
+        preview_pdf_path = _resilience_help_preview_pdf_path(document)
+    except Exception:
+        preview_pdf_path = ""
+    try:
+        if path and os.path.isfile(path):
+            os.remove(path)
+        if preview_pdf_path and os.path.isfile(preview_pdf_path):
+            os.remove(preview_pdf_path)
+    except Exception:
+        logging.exception("Suppression impossible du document d'aide %s.", path)
+
+
+def _resilience_help_document(conn):
+    q_docs = _help_documents_table_ident()
+    row = conn.execute(text(f"""
+        SELECT page_key, original_filename, stored_filename, file_path, file_ext, mime_type, file_size, preview_text, uploaded_by, uploaded_at
+        FROM {q_docs}
+        WHERE page_key = :page_key
+    """), {"page_key": RESILIENCE_HELP_PAGE_KEY}).mappings().first()
+
+    if not row:
+        return None
+
+    document = {
+        "page_key": row["page_key"],
+        "original_filename": row["original_filename"],
+        "stored_filename": row["stored_filename"],
+        "file_path": row["file_path"],
+        "file_ext": row["file_ext"],
+        "mime_type": row["mime_type"],
+        "file_size": int(row["file_size"] or 0),
+        "preview_text": row["preview_text"] or "",
+        "uploaded_by": row["uploaded_by"],
+        "uploaded_at": row["uploaded_at"].isoformat() if row["uploaded_at"] else None,
+    }
+
+    if document["file_path"] and os.path.isfile(document["file_path"]):
+        return document
+
+    conn.execute(text(f"""
+        DELETE FROM {q_docs}
+        WHERE page_key = :page_key
+    """), {"page_key": RESILIENCE_HELP_PAGE_KEY})
+    return None
+
+
+def _upsert_resilience_help_document(conn, document: dict):
+    q_docs = _help_documents_table_ident()
+    conn.execute(text(f"""
+        INSERT INTO {q_docs}
+        (page_key, original_filename, stored_filename, file_path, file_ext, mime_type, file_size, preview_text, uploaded_by, uploaded_at)
+        VALUES (:page_key, :original_filename, :stored_filename, :file_path, :file_ext, :mime_type, :file_size, :preview_text, :uploaded_by, now())
+        ON CONFLICT (page_key) DO UPDATE
+        SET original_filename = EXCLUDED.original_filename,
+            stored_filename = EXCLUDED.stored_filename,
+            file_path = EXCLUDED.file_path,
+            file_ext = EXCLUDED.file_ext,
+            mime_type = EXCLUDED.mime_type,
+            file_size = EXCLUDED.file_size,
+            preview_text = EXCLUDED.preview_text,
+            uploaded_by = EXCLUDED.uploaded_by,
+            uploaded_at = now()
+    """), {
+        "page_key": RESILIENCE_HELP_PAGE_KEY,
+        "original_filename": document["original_filename"],
+        "stored_filename": document["stored_filename"],
+        "file_path": document["file_path"],
+        "file_ext": document["file_ext"],
+        "mime_type": document["mime_type"],
+        "file_size": int(document["file_size"] or 0),
+        "preview_text": document.get("preview_text") or "",
+        "uploaded_by": document.get("uploaded_by"),
+    })
+
+
+def _delete_resilience_help_document_row(conn):
+    q_docs = _help_documents_table_ident()
+    document = _resilience_help_document(conn)
+    conn.execute(text(f"""
+        DELETE FROM {q_docs}
+        WHERE page_key = :page_key
+    """), {"page_key": RESILIENCE_HELP_PAGE_KEY})
+    return document
+
+
+def _serialize_resilience_help_document(document: dict | None) -> dict | None:
+    if not document:
+        return None
+
+    ext = str(document.get("file_ext") or "").lower()
+    preview_mode = "none"
+    preview_available = False
+    if ext == ".pdf":
+        preview_mode = "pdf"
+        preview_available = True
+    elif ext in {".doc", ".docx"}:
+        preview_mode = "word_pdf"
+        preview_available = _resilience_help_word_preview_supported()
+
+    return {
+        "original_filename": document.get("original_filename"),
+        "file_ext": ext,
+        "mime_type": document.get("mime_type"),
+        "file_size": int(document.get("file_size") or 0),
+        "uploaded_by": document.get("uploaded_by"),
+        "uploaded_at": document.get("uploaded_at"),
+        "preview_available": preview_available,
+        "preview_mode": preview_mode,
+        "download_url": url_for("resilience_help_document_download"),
+        "preview_url": url_for("resilience_help_document_preview"),
     }
 
 
@@ -5920,19 +6259,25 @@ def resilience_admin_user_role(user_id: int):
     })
 
 
-@app.route('/resilience_help_content', methods=['GET', 'POST'])
+@app.route('/resilience_help_content', methods=['GET'])
 def resilience_help_content():
     _ensure_admin_support_tables()
 
-    if request.method == 'GET':
-        current_user = _current_user()
-        with engine.begin() as conn:
-            content = _resilience_help_content(conn)
-        return jsonify({
-            "status": "ok",
-            "content": content,
-            "can_edit": bool(current_user and current_user.is_admin),
-        })
+    current_user = _current_user()
+    with engine.begin() as conn:
+        content = _resilience_help_content(conn)
+        document = _resilience_help_document(conn)
+    return jsonify({
+        "status": "ok",
+        "content": content,
+        "document": _serialize_resilience_help_document(document),
+        "can_edit": bool(current_user and current_user.is_admin),
+    })
+
+
+@app.route('/resilience_help_document', methods=['POST', 'DELETE'], strict_slashes=False)
+def resilience_help_document():
+    _ensure_admin_support_tables()
 
     try:
         admin_user = _require_admin_user()
@@ -5940,37 +6285,148 @@ def resilience_help_content():
         status_code = 401 if _current_user_id() is None else 403
         return jsonify({"status": "error", "message": str(exc)}), status_code
 
-    payload = request.get_json(silent=True) or request.form or {}
-    title = str(payload.get("title") or "").strip()
-    body = str(payload.get("body") or "").strip()
-    if not title:
-        return jsonify({"status": "error", "message": "Le titre de l'aide est obligatoire."}), 400
-    if not body:
-        return jsonify({"status": "error", "message": "Le contenu de l'aide est obligatoire."}), 400
-
-    q_help = _qualified_ident(AUTH_SCHEMA, "help_content")
-    with engine.begin() as conn:
-        conn.execute(text(f"""
-            INSERT INTO {q_help} (page_key, title, body, updated_by, updated_at)
-            VALUES (:page_key, :title, :body, :updated_by, now())
-            ON CONFLICT (page_key) DO UPDATE
-            SET title = EXCLUDED.title,
-                body = EXCLUDED.body,
-                updated_by = EXCLUDED.updated_by,
-                updated_at = now()
-        """), {
-            "page_key": RESILIENCE_HELP_PAGE_KEY,
-            "title": title,
-            "body": body,
-            "updated_by": admin_user.id,
+    if request.method == 'DELETE':
+        with engine.begin() as conn:
+            previous_document = _delete_resilience_help_document_row(conn)
+        _delete_resilience_help_document_file(previous_document)
+        return jsonify({
+            "status": "ok",
+            "message": "Document de référence supprimé.",
+            "document": None,
         })
-        content = _resilience_help_content(conn)
+
+    uploaded_file = request.files.get("file")
+    if not uploaded_file or not str(uploaded_file.filename or "").strip():
+        return jsonify({"status": "error", "message": "Sélectionnez un fichier PDF, DOC ou DOCX."}), 400
+
+    stored_document = None
+    previous_document = None
+    try:
+        stored_document = _store_resilience_help_document(uploaded_file, admin_user.id)
+        with engine.begin() as conn:
+            previous_document = _resilience_help_document(conn)
+            _upsert_resilience_help_document(conn, stored_document)
+        if previous_document and previous_document.get("file_path") != stored_document.get("file_path"):
+            _delete_resilience_help_document_file(previous_document)
+    except ValueError as exc:
+        if stored_document:
+            _delete_resilience_help_document_file(stored_document)
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except Exception as exc:
+        if stored_document:
+            _delete_resilience_help_document_file(stored_document)
+        logging.exception("Import du document d'aide impossible.")
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
     return jsonify({
         "status": "ok",
-        "message": "Documentation mise à jour.",
-        "content": content,
+        "message": "Document de référence importé.",
+        "document": _serialize_resilience_help_document(stored_document),
     })
+
+
+@app.route('/resilience_help_document_download', strict_slashes=False)
+def resilience_help_document_download():
+    current_user = _current_user()
+    if not current_user:
+        return redirect(url_for('login'))
+
+    _ensure_admin_support_tables()
+    with engine.begin() as conn:
+        document = _resilience_help_document(conn)
+    if not document:
+        return jsonify({"status": "error", "message": "Aucun document de référence disponible."}), 404
+
+    return send_file(
+        document["file_path"],
+        mimetype=document["mime_type"],
+        as_attachment=True,
+        download_name=document["original_filename"],
+    )
+
+
+@app.route('/resilience_help_document_preview', strict_slashes=False)
+def resilience_help_document_preview():
+    current_user = _current_user()
+    if not current_user:
+        return redirect(url_for('login'))
+
+    _ensure_admin_support_tables()
+    with engine.begin() as conn:
+        document = _resilience_help_document(conn)
+    if not document:
+        return Response("<p>Aucun document de référence disponible.</p>", mimetype="text/html"), 404
+
+    ext = str(document.get("file_ext") or "").lower()
+    if ext == ".pdf":
+        return send_file(
+            document["file_path"],
+            mimetype=document["mime_type"],
+            as_attachment=False,
+            download_name=document["original_filename"],
+        )
+
+    if ext in {".doc", ".docx"}:
+        try:
+            preview_pdf_path = _ensure_resilience_help_preview_pdf(document)
+            return send_file(
+                preview_pdf_path,
+                mimetype="application/pdf",
+                as_attachment=False,
+                download_name=f"{os.path.splitext(document['original_filename'])[0]}.pdf",
+            )
+        except Exception as exc:
+            logging.exception("Prévisualisation PDF Word impossible pour %s.", document.get("file_path"))
+            fallback_html = f"""<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prévisualisation indisponible</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; background: #020617; color: #e2e8f0; }}
+    main {{ max-width: 760px; margin: 0 auto; padding: 24px; }}
+    .card {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 14px; padding: 24px; }}
+    a {{ color: #67e8f9; }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>Prévisualisation Word indisponible</h1>
+      <p>La conversion du document Word vers PDF a échoué sur le serveur.</p>
+      <p>Détail technique : {html.escape(str(exc))}</p>
+      <p><a href="{html.escape(url_for('resilience_help_document_download'))}">Télécharger le document original</a></p>
+    </div>
+  </main>
+</body>
+</html>"""
+            return Response(fallback_html, mimetype="text/html"), 500
+
+    fallback_html = f"""<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prévisualisation indisponible</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; background: #020617; color: #e2e8f0; }}
+    main {{ max-width: 760px; margin: 0 auto; padding: 24px; }}
+    .card {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 14px; padding: 24px; }}
+    a {{ color: #67e8f9; }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>Prévisualisation indisponible</h1>
+      <p>Le format {html.escape(ext or 'inconnu')} ne peut pas être prévisualisé directement dans l'application.</p>
+      <p><a href="{html.escape(url_for('resilience_help_document_download'))}">Télécharger le document</a></p>
+    </div>
+  </main>
+</body>
+</html>"""
+    return Response(fallback_html, mimetype="text/html")
 
 
 @app.route('/upload_resilience', methods=['POST'])
