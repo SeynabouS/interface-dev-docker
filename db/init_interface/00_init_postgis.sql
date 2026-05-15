@@ -1,3 +1,0 @@
--- Init DB Interface Analyse
-CREATE EXTENSION IF NOT EXISTS postgis;
-CREATE SCHEMA IF NOT EXISTS gracethd;

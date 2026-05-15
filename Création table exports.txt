@@ -1,8 +1,0 @@
-Creation table exports:
-CREATE TABLE graceTHD.exports (
-    id SERIAL PRIMARY KEY,
-    export_date VARCHAR(255) NOT NULL,
-    file_name VARCHAR(255) NOT NULL,
-    table_name VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);

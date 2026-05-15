@@ -4,7 +4,7 @@ import sys
 def create_user(username, password):
     """Créer un utilisateur et l'ajouter dans la base de données"""
     with app.app_context():  # Assurer l'utilisation du contexte Flask
-        # Crée la table users dans le schéma courant (gracethd ou resilience) si absente.
+        # Crée la table users dans le schéma resilience si absente.
         User.__table__.create(bind=db.engine, checkfirst=True)
 
         # Vérifier si l'utilisateur existe déjà

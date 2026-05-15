@@ -1,0 +1,10 @@
+.git
+__pycache__
+*.pyc
+.env
+.venv
+venv
+uploads
+temp_shapefiles
+static/exports
+*.docx

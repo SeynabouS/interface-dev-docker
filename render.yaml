@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: sipperesiste-resilience
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerCommand: gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 0 --graceful-timeout 300 app_resilience:app
+    preDeployCommand: python scripts/init_render_db.py
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DB_HOST
+        fromDatabase:
+          name: sipperesiste-resilience-db
+          property: host
+      - key: DB_PORT
+        value: 5432
+      - key: DB_USERNAME
+        fromDatabase:
+          name: sipperesiste-resilience-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: sipperesiste-resilience-db
+          property: password
+      - key: DB_NAME
+        fromDatabase:
+          name: sipperesiste-resilience-db
+          property: database
+      - key: DB_SEARCH_PATH
+        value: resilience,public
+      - key: AUTH_SCHEMA
+        value: resilience
+      - key: LOGIN_TEMPLATE
+        value: login_resilience.html
+      - key: RESET_LINK_VIA_UI
+        value: 0
+
+databases:
+  - name: sipperesiste-resilience-db
+    plan: free
+    databaseName: sipperesiste_resilience
+    postgresMajorVersion: "16"

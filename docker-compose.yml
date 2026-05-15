@@ -1,23 +1,4 @@
 services:
-  db_interface:
-    image: postgis/postgis:16-3.4
-    container_name: telecom_db_interface
-    environment:
-      POSTGRES_USER: ${DB_USERNAME_INTERFACE:-app}
-      POSTGRES_PASSWORD: ${DB_PASSWORD_INTERFACE:-app}
-      POSTGRES_DB: ${DB_NAME_INTERFACE:-telecom_interface_db}
-    ports:
-      - "5432:5432"
-    volumes:
-      - db_interface_data:/var/lib/postgresql/data
-      - ./db/init_interface:/docker-entrypoint-initdb.d
-      - ./db/import:/import
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   db_resilience:
     image: postgis/postgis:16-3.4
     container_name: telecom_db_resilience
@@ -35,49 +16,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: telecom_pgadmin
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
-    ports:
-      - "5050:80"
-    depends_on:
-      - db_interface
-      - db_resilience
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: telecom_web_interface
-    env_file:
-      - .env
-    environment:
-      DB_HOST: db_interface
-      DB_PORT: 5432
-      DB_USERNAME: ${DB_USERNAME_INTERFACE:-app}
-      DB_PASSWORD: ${DB_PASSWORD_INTERFACE:-app}
-      DB_NAME: ${DB_NAME_INTERFACE:-telecom_interface_db}
-      DB_SEARCH_PATH: gracethd,public
-      AUTH_SCHEMA: gracethd
-      LOGIN_TEMPLATE: login_interface.html
-      RESET_LINK_VIA_UI: ${RESET_LINK_VIA_UI:-1}
-    depends_on:
-      db_interface:
-        condition: service_healthy
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./uploads:/app/uploads
-      - ./temp_shapefiles:/app/temp_shapefiles
-      - ./static:/app/static
-    command: gunicorn -w 2 -b 0.0.0.0:8000 --timeout 300 --graceful-timeout 300 app_interface:app
-    restart: unless-stopped
 
   web_resilience:
     build:
@@ -110,6 +48,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  db_interface_data:
   db_resilience_data:
-  pgadmin_data:

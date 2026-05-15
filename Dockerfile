@@ -40,4 +40,4 @@ RUN pip install --no-cache-dir \
 COPY . /app
 
 EXPOSE 8000
-CMD ["gunicorn", "-w", "3", "-b", "0.0.0.0:8000", "app_interface:app"]
+CMD ["sh", "-c", "gunicorn -w 2 -b 0.0.0.0:${PORT:-8000} --timeout 0 --graceful-timeout 300 app_resilience:app"]
