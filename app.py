@@ -108,6 +108,7 @@ _KEY_COLUMN_CACHE: dict[tuple[str, str], str | None] = {}
 _ADMIN_SUPPORT_READY = False
 _RUN_HISTORY_READY = False
 PUBLIC_EXACT_PATHS = {
+    "/",
     "/healthz",
     "/login",
     "/logout",
@@ -118,8 +119,7 @@ PUBLIC_PREFIX_PATHS = (
     "/image/",
 )
 PUBLIC_STATIC_PREFIX_PATHS = (
-    "/static/css/",
-    "/static/js/",
+    "/static/",
 )
 
 def _quote_ident(identifier: str) -> str:
@@ -144,6 +144,14 @@ def _is_public_path(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in PUBLIC_STATIC_PREFIX_PATHS)
 
 
+def _is_allowed_resilience_only_path(path: str) -> bool:
+    exact_paths = set(app.config.get("RESILIENCE_ONLY_EXACT_PATHS", ()))
+    prefix_paths = tuple(app.config.get("RESILIENCE_ONLY_PREFIX_PATHS", ()))
+    if path in exact_paths:
+        return True
+    return any(path.startswith(prefix) for prefix in prefix_paths)
+
+
 def _wants_json_auth_response() -> bool:
     if request.is_json:
         return True
@@ -157,6 +165,8 @@ def _wants_json_auth_response() -> bool:
 @app.before_request
 def require_authenticated_user():
     if _is_public_path(request.path):
+        return None
+    if app.config.get("RESILIENCE_ONLY") and not _is_allowed_resilience_only_path(request.path):
         return None
     if _current_user_id() is not None:
         return None
@@ -1225,62 +1235,6 @@ def _import_vector_dataset_to_postgis(path: str, table_name: str, schema: str = 
         return _import_vector_dataset_via_geopandas(path, table_name, schema=schema)
     return _import_vector_dataset_via_ogr(path, table_name, schema=schema)
 
-def prepare_gdf_for_postgis(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """
-    - Reprojette en L93 (2154)
-    - Réutilise la géométrie existante
-    - Renomme tout attribut parasite nommé 'geometry' / 'geom'
-    - Normalise le nom de la géo en 'geom'
-    - Déduplique tous les noms de colonnes
-    """
-    # 0) CRS -> L93
-    if gdf.crs is None:
-        gdf = gdf.set_crs(epsg=4326)
-    gdf = gdf.to_crs(epsg=DEFAULT_SRID)
-
-    # 1) Nom de la colonne géométrique ACTUELLE
-    current_geom = gdf.geometry.name  # souvent 'geometry'
-
-    # 2) Si un attribut porte le même nom (ex. 'geometry' dans le DBF), on le renomme
-    rename_map = {}
-    for c in gdf.columns:
-        if c == current_geom:
-            continue  # c'est la vraie géo
-        if c.lower() in ("geometry", "geom"):
-            # évite toutes collisions avec le futur nom 'geom'
-            newc = f"{c}_attr"
-            i = 1
-            while newc in gdf.columns:
-                newc = f"{c}_attr{i}"
-                i += 1
-            rename_map[c] = newc
-    if rename_map:
-        gdf = gdf.rename(columns=rename_map)
-
-    # 3) Renommer la géométrie en 'geom' (standard PostGIS)
-    if current_geom != 'geom':
-        gdf = gdf.rename_geometry('geom')
-        current_geom = 'geom'
-
-    # 4) Dédupliquer proprement tous les noms (sécurité)
-    new_cols, seen = [], set()
-    for c in gdf.columns:
-        name = str(c).strip()
-        base = name
-        k = 1
-        # réserve 'geom' pour la géométrie
-        if name == 'geom' and c != 'geom':
-            name = f"{base}_{k}"; k += 1
-        while name in seen:
-            name = f"{base}_{k}"
-            k += 1
-        new_cols.append(name)
-        seen.add(name)
-    gdf.columns = new_cols
-    gdf = gdf.set_geometry('geom')
-
-    return gdf
-
 
 def _coerce_geometry_value(val):
     if val is None:
@@ -2333,18 +2287,6 @@ def download_resilience_layer(layer):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-# ==================== Batch croisement aléas ==================== #
-
-def _list_alea_tables():
-    with engine.connect() as conn:
-        res = conn.execute(text("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_schema='resilience' AND table_name LIKE 'alea_%'
-            ORDER BY table_name
-        """))
-        return [r[0] for r in res]
-
-
 def _has_column(conn, schema, table, col):
     q = text("""
         SELECT 1 FROM information_schema.columns
@@ -3055,28 +2997,6 @@ def _private_run_layer_by_display_name(conn, owner_user_id: int, display_name: s
     }).mappings().first()
 
 
-def _private_analysis_layer_by_name(conn, layer_name: str):
-    return conn.execute(text("""
-        SELECT layer_name, display_name, owner_user_id, created_at
-        FROM resilience.private_analysis_layers
-        WHERE layer_name = :layer_name
-        LIMIT 1
-    """), {"layer_name": layer_name}).mappings().first()
-
-
-def _private_analysis_layer_by_display_name(conn, owner_user_id: int, display_name: str):
-    return conn.execute(text("""
-        SELECT layer_name, display_name, owner_user_id, created_at
-        FROM resilience.private_analysis_layers
-        WHERE owner_user_id = :owner_user_id
-          AND display_name = :display_name
-        LIMIT 1
-    """), {
-        "owner_user_id": owner_user_id,
-        "display_name": display_name,
-    }).mappings().first()
-
-
 def _register_private_run_layer(conn, layer_name: str, display_name: str, owner_user_id: int):
     conn.execute(text("""
         INSERT INTO resilience.private_run_layers (layer_name, display_name, owner_user_id)
@@ -3098,20 +3018,6 @@ def _unregister_private_run_layer(conn, layer_name: str):
     """), {"layer_name": layer_name})
 
 
-def _register_private_analysis_layer(conn, layer_name: str, display_name: str, owner_user_id: int):
-    conn.execute(text("""
-        INSERT INTO resilience.private_analysis_layers (layer_name, display_name, owner_user_id)
-        VALUES (:layer_name, :display_name, :owner_user_id)
-        ON CONFLICT (layer_name) DO UPDATE
-        SET display_name = EXCLUDED.display_name,
-            owner_user_id = EXCLUDED.owner_user_id
-    """), {
-        "layer_name": layer_name,
-        "display_name": display_name,
-        "owner_user_id": owner_user_id,
-    })
-
-
 def _unregister_private_analysis_layer(conn, layer_name: str):
     conn.execute(text("""
         DELETE FROM resilience.private_analysis_layers
@@ -3125,15 +3031,6 @@ def _make_private_run_layer_name(display_name: str, owner_user_id: int) -> str:
     prefix = f"run_u{owner_user_id}_"
     max_base_len = max(1, 63 - len(prefix) - len(digest) - 1)
     base = normalized[:max_base_len].rstrip('_') or "run"
-    return f"{prefix}{base}_{digest}"
-
-
-def _make_private_analysis_layer_name(display_name: str, owner_user_id: int) -> str:
-    normalized = re.sub(r'[^A-Za-z0-9_]+', '_', str(display_name or "")).strip('_').lower() or "analyse"
-    digest = hashlib.sha1(f"analysis:{owner_user_id}:{display_name}".encode("utf-8")).hexdigest()[:12]
-    prefix = f"analysis_u{owner_user_id}_"
-    max_base_len = max(1, 63 - len(prefix) - len(digest) - 1)
-    base = normalized[:max_base_len].rstrip('_') or "analyse"
     return f"{prefix}{base}_{digest}"
 
 
@@ -3202,37 +3099,6 @@ def _plan_private_run_target(conn, display_name: str, owner_user_id: int):
     collision = _resolve_resilience_layer_for_user(conn, layer_name, owner_user_id=None)
     if collision and collision["scope"] == "public":
         raise ValueError(f'Le nom interne "{layer_name}" est déjà utilisé. Choisissez un autre nom de run.')
-
-    return {
-        "layer_name": layer_name,
-        "display_name": display_name,
-    }
-
-
-def _plan_private_analysis_target(conn, display_name: str, owner_user_id: int):
-    existing = _private_analysis_layer_by_display_name(conn, owner_user_id, display_name)
-    if existing:
-        return {
-            "layer_name": existing["layer_name"],
-            "display_name": existing["display_name"],
-        }
-
-    existing_run = _private_run_layer_by_display_name(conn, owner_user_id, display_name)
-    if existing_run:
-        raise ValueError(
-            f'Le nom "{display_name}" est déjà utilisé par un résultat de run privé.'
-        )
-
-    existing_public = _resolve_resilience_layer_for_user(conn, display_name, owner_user_id=None)
-    if existing_public and existing_public["scope"] == "public":
-        raise ValueError(f'Le nom "{display_name}" est déjà utilisé par une couche partagée.')
-
-    layer_name = _make_private_analysis_layer_name(display_name, owner_user_id)
-    collision = _resolve_resilience_layer_for_user(conn, layer_name, owner_user_id=None)
-    if collision and collision["scope"] == "public":
-        raise ValueError(
-            f'Le nom interne "{layer_name}" est déjà utilisé. Choisissez un autre nom de couche.'
-        )
 
     return {
         "layer_name": layer_name,

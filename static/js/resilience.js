@@ -64,6 +64,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const adminUserForm = document.getElementById('admin-user-form');
     const adminUserUsername = document.getElementById('admin-user-username');
     const adminUserPassword = document.getElementById('admin-user-password');
+    const adminUserPasswordConfirm = document.getElementById('admin-user-password-confirm');
     const adminUserIsAdmin = document.getElementById('admin-user-is-admin');
     const adminUserSubmit = document.getElementById('admin-user-submit');
     const adminUserList = document.getElementById('admin-user-list');
@@ -1521,7 +1522,24 @@ document.addEventListener('DOMContentLoaded', function () {
 
             const username = String((adminUserUsername && adminUserUsername.value) || '').trim();
             const password = String((adminUserPassword && adminUserPassword.value) || '');
+            const passwordConfirm = String((adminUserPasswordConfirm && adminUserPasswordConfirm.value) || '');
             const isAdmin = !!(adminUserIsAdmin && adminUserIsAdmin.checked);
+
+            if (!/^[A-Za-z0-9_.-]{3,50}$/.test(username)) {
+                showAdminUserFeedback("Nom d'utilisateur invalide: utilisez 3 à 50 caractères alphanumériques, ., _ ou -.", 'error');
+                if (adminUserUsername) adminUserUsername.focus();
+                return;
+            }
+            if (password.length < 8) {
+                showAdminUserFeedback('Le mot de passe doit contenir au moins 8 caractères.', 'error');
+                if (adminUserPassword) adminUserPassword.focus();
+                return;
+            }
+            if (password !== passwordConfirm) {
+                showAdminUserFeedback('Les deux mots de passe ne correspondent pas.', 'error');
+                if (adminUserPasswordConfirm) adminUserPasswordConfirm.focus();
+                return;
+            }
 
             adminUserSubmit.disabled = true;
             fetch('/resilience_admin_users', {

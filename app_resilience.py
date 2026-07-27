@@ -11,7 +11,7 @@ AUTH_EXACT_PATHS = {
 }
 AUTH_PREFIX_PATHS = (
     "/reset/",
-    "/static/",
+    "/static/js/",
     "/image/",
 )
 
@@ -44,6 +44,11 @@ RESILIENCE_PREFIX_PATHS = (
     "/resilience_dependencies/",
     "/download_resilience_layer/",
 )
+
+app.config["RESILIENCE_ONLY"] = True
+app.config["RESILIENCE_ONLY_EXACT_PATHS"] = AUTH_EXACT_PATHS | RESILIENCE_EXACT_PATHS | {"/"}
+app.config["RESILIENCE_ONLY_PREFIX_PATHS"] = AUTH_PREFIX_PATHS + RESILIENCE_PREFIX_PATHS
+
 
 def _is_resilience_path(path: str) -> bool:
     if path in RESILIENCE_EXACT_PATHS:
