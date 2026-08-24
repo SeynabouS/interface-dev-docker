@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USERNAME_RESILIENCE:-app}
-      POSTGRES_PASSWORD: ${DB_PASSWORD_RESILIENCE:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_RESILIENCE:?DB_PASSWORD_RESILIENCE doit etre defini dans .env}
       POSTGRES_DB: ${DB_NAME_RESILIENCE:-telecom_resilience_db}
     ports:
       - "5433:5432"
@@ -29,7 +29,7 @@ services:
       DB_HOST: db_resilience
       DB_PORT: 5432
       DB_USERNAME: ${DB_USERNAME_RESILIENCE:-app}
-      DB_PASSWORD: ${DB_PASSWORD_RESILIENCE:-app}
+      DB_PASSWORD: ${DB_PASSWORD_RESILIENCE:?DB_PASSWORD_RESILIENCE doit etre defini dans .env}
       DB_NAME: ${DB_NAME_RESILIENCE:-telecom_resilience_db}
       DB_SEARCH_PATH: resilience,public
       AUTH_SCHEMA: resilience

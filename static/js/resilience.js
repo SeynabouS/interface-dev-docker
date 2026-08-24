@@ -112,9 +112,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // ========== Upload de fichiers ========== //
-    const SHP_EXTS = new Set(['.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
-    const SHP_REQUIRED = ['.shp', '.shx', '.dbf'];
-    const ALLOWED_EXTS = new Set(['.gpkg', '.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx']);
+    const ALLOWED_EXTS = new Set(['.gpkg']);
     let uploadDatasets = [];
     let analysisUploadDatasets = [];
 
@@ -1201,48 +1199,15 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function buildDatasets(files) {
-        const shapefileGroups = new Map();
-        const gpkgFiles = [];
-
-        files.forEach((file) => {
-            const ext = getExt(file.name);
-            if (ext === '.gpkg') {
-                gpkgFiles.push(file);
-                return;
-            }
-            if (SHP_EXTS.has(ext)) {
-                const stem = file.name.slice(0, -ext.length);
-                if (!shapefileGroups.has(stem)) {
-                    shapefileGroups.set(stem, { exts: new Set() });
-                }
-                shapefileGroups.get(stem).exts.add(ext);
-            }
-        });
-
-        const datasets = [];
-        shapefileGroups.forEach((group, stem) => {
-            if (!group.exts.has('.shp')) return;
-            const missing = SHP_REQUIRED.filter((ext) => !group.exts.has(ext));
-            datasets.push({
-                key: `${stem}.shp`,
-                type: 'shp',
-                label: `${stem}.shp`,
-                exts: Array.from(group.exts).sort(),
-                missing
-            });
-        });
-
-        gpkgFiles.forEach((file) => {
-            datasets.push({
+        return files
+            .filter((file) => getExt(file.name) === '.gpkg')
+            .map((file) => ({
                 key: file.name,
                 type: 'gpkg',
                 label: file.name,
                 exts: ['.gpkg'],
                 missing: []
-            });
-        });
-
-        return datasets;
+            }));
     }
 
     function getAllowedUploadFiles(fileInputEl) {
@@ -1259,15 +1224,13 @@ document.addEventListener('DOMContentLoaded', function () {
         const datasets = buildDatasets(files);
 
         if (!datasets.length) {
-            containerEl.innerHTML = "<em>Aucun fichier GPKG ou shapefile détecté.</em>";
+            containerEl.innerHTML = "<em>Aucun fichier GPKG détecté.</em>";
             return [];
         }
 
         datasets.forEach((ds) => {
             const div = document.createElement('div');
-            const extsInfo = ds.type === 'shp'
-                ? `Extensions: ${ds.exts.join(', ')}`
-                : 'Format: GPKG';
+            const extsInfo = 'Format: GPKG';
             const missingInfo = ds.missing.length
                 ? `<div style="color:#b00; font-size:0.9em;">Manque: ${ds.missing.join(', ')}</div>`
                 : '';
@@ -1322,15 +1285,7 @@ document.addEventListener('DOMContentLoaded', function () {
         uploadBtn.addEventListener('click', () => {
             const files = getAllowedUploadFiles(fileInput);
             if (importFeedback) importFeedback.classList.add('hidden-element');
-            if (!files.length) return alert("Veuillez sélectionner des fichiers GPKG ou Shapefile.");
-
-            const missingRequired = uploadDatasets
-                .filter((ds) => ds.type === 'shp' && ds.missing.length)
-                .map((ds) => `${ds.label} (${ds.missing.join(', ')})`);
-            if (missingRequired.length) {
-                alert("Shapefile incomplet : " + missingRequired.join(' | '));
-                return;
-            }
+            if (!files.length) return alert("Veuillez sélectionner des fichiers GPKG.");
 
             const formData = new FormData();
             files.forEach((file) => {
@@ -1375,15 +1330,7 @@ document.addEventListener('DOMContentLoaded', function () {
         analysisUploadBtn.addEventListener('click', () => {
             const files = getAllowedUploadFiles(analysisFileInput);
             if (analysisImportFeedback) analysisImportFeedback.classList.add('hidden-element');
-            if (!files.length) return alert("Veuillez sélectionner votre couche d'analyse (GPKG ou Shapefile).");
-
-            const missingRequired = analysisUploadDatasets
-                .filter((ds) => ds.type === 'shp' && ds.missing.length)
-                .map((ds) => `${ds.label} (${ds.missing.join(', ')})`);
-            if (missingRequired.length) {
-                alert("Shapefile incomplet : " + missingRequired.join(' | '));
-                return;
-            }
+            if (!files.length) return alert("Veuillez sélectionner votre couche d'analyse GPKG.");
             if (analysisUploadDatasets.length !== 1) {
                 alert("Importez une seule couche principale à la fois pour l'analyse réseau.");
                 return;

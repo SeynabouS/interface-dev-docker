@@ -1681,14 +1681,9 @@ def upload_resilience():
         legacy_items.sort(key=lambda kv: int(kv[0].split('-')[1]) if kv[0].split('-')[1].isdigit() else 0)
         legacy_names = [v for _, v in legacy_items if v]
 
-    from werkzeug.utils import secure_filename
-    import tempfile
-
-    SHP_EXTS = {'.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx'}
-    SHP_REQUIRED = {'.shp', '.shx', '.dbf'}
-
     with tempfile.TemporaryDirectory() as tmpdir:
         saved_files = []
+        rejected_files = []
         seen_names = set()
         for file in files:
             orig_name = os.path.basename(file.filename or "")
@@ -1700,46 +1695,27 @@ def upload_resilience():
             if safe_name in seen_names:
                 return jsonify({'status': 'error', 'message': f'Fichier en double : {orig_name}'})
             seen_names.add(safe_name)
+            if os.path.splitext(safe_name)[1].lower() != '.gpkg':
+                rejected_files.append(orig_name)
+                continue
             filepath = os.path.join(tmpdir, safe_name)
             file.save(filepath)
             saved_files.append(filepath)
 
+        if rejected_files:
+            return jsonify({
+                'status': 'error',
+                'message': 'Format non supporté. Seuls les fichiers GPKG sont acceptés.'
+            }), 400
         if not saved_files:
             return jsonify({'status': 'error', 'message': 'Aucun fichier reçu.'})
 
-        stems = {}
         gpkg_files = []
         for p in saved_files:
-            fname = os.path.basename(p)
-            stem, ext = os.path.splitext(fname)
-            ext = ext.lower()
-            if ext == '.gpkg':
+            if os.path.splitext(p)[1].lower() == '.gpkg':
                 gpkg_files.append(p)
-                continue
-            if ext in SHP_EXTS:
-                stems.setdefault(stem, set()).add(ext)
-
-        shapefile_stems = [s for s, exts in stems.items() if '.shp' in exts]
-        missing_required = {
-            stem: sorted(SHP_REQUIRED - exts)
-            for stem, exts in stems.items()
-            if '.shp' in exts and not SHP_REQUIRED.issubset(exts)
-        }
-        if missing_required:
-            details = "; ".join([f"{stem}: manque {', '.join(m)}" for stem, m in missing_required.items()])
-            return jsonify({'status': 'error', 'message': f'Shapefile incomplet ({details})'})
 
         datasets = []
-        for stem in sorted(shapefile_stems):
-            shp_path = os.path.join(tmpdir, f"{stem}.shp")
-            if not os.path.exists(shp_path):
-                continue
-            datasets.append({
-                "path": shp_path,
-                "key": f"{stem}.shp",
-                "default_name": stem
-            })
-
         for p in sorted(gpkg_files):
             base = os.path.basename(p)
             datasets.append({
@@ -1749,7 +1725,7 @@ def upload_resilience():
             })
 
         if not datasets:
-            return jsonify({'status': 'error', 'message': 'Aucun fichier GPKG ou shapefile détecté.'})
+            return jsonify({'status': 'error', 'message': 'Aucun fichier GPKG détecté.'})
 
         target_names = set()
         imported_layers = []
@@ -1810,8 +1786,6 @@ def upload_resilience_analysis_layer():
         legacy_items.sort(key=lambda kv: int(kv[0].split('-')[1]) if kv[0].split('-')[1].isdigit() else 0)
         legacy_names = [v for _, v in legacy_items if v]
 
-    shp_exts = {'.shp', '.shx', '.dbf', '.prj', '.cpg', '.sbn', '.sbx'}
-    shp_required = {'.shp', '.shx', '.dbf'}
     stage_dir = None
     try:
         stage_dir = tempfile.mkdtemp(
@@ -1820,6 +1794,7 @@ def upload_resilience_analysis_layer():
         )
 
         saved_files = []
+        rejected_files = []
         seen_names = set()
         for file in files:
             orig_name = os.path.basename(file.filename or "")
@@ -1831,46 +1806,27 @@ def upload_resilience_analysis_layer():
             if safe_name in seen_names:
                 return jsonify({'status': 'error', 'message': f'Fichier en double : {orig_name}'}), 400
             seen_names.add(safe_name)
+            if os.path.splitext(safe_name)[1].lower() != '.gpkg':
+                rejected_files.append(orig_name)
+                continue
             filepath = os.path.join(stage_dir, safe_name)
             file.save(filepath)
             saved_files.append(filepath)
 
+        if rejected_files:
+            return jsonify({
+                'status': 'error',
+                'message': 'Format non supporté. Seuls les fichiers GPKG sont acceptés.'
+            }), 400
         if not saved_files:
             return jsonify({'status': 'error', 'message': 'Aucun fichier reçu.'}), 400
 
-        stems = {}
         gpkg_files = []
         for path in saved_files:
-            fname = os.path.basename(path)
-            stem, ext = os.path.splitext(fname)
-            ext = ext.lower()
-            if ext == '.gpkg':
+            if os.path.splitext(path)[1].lower() == '.gpkg':
                 gpkg_files.append(path)
-                continue
-            if ext in shp_exts:
-                stems.setdefault(stem, set()).add(ext)
-
-        shapefile_stems = [stem for stem, exts in stems.items() if '.shp' in exts]
-        missing_required = {
-            stem: sorted(shp_required - exts)
-            for stem, exts in stems.items()
-            if '.shp' in exts and not shp_required.issubset(exts)
-        }
-        if missing_required:
-            details = "; ".join([f"{stem}: manque {', '.join(m)}" for stem, m in missing_required.items()])
-            return jsonify({'status': 'error', 'message': f'Shapefile incomplet ({details})'}), 400
 
         datasets = []
-        for stem in sorted(shapefile_stems):
-            shp_path = os.path.join(stage_dir, f"{stem}.shp")
-            if not os.path.exists(shp_path):
-                continue
-            datasets.append({
-                "path": shp_path,
-                "key": f"{stem}.shp",
-                "default_name": stem,
-            })
-
         for path in sorted(gpkg_files):
             base = os.path.basename(path)
             datasets.append({
@@ -1880,7 +1836,7 @@ def upload_resilience_analysis_layer():
             })
 
         if not datasets:
-            return jsonify({'status': 'error', 'message': 'Aucun fichier GPKG ou shapefile détecté.'}), 400
+            return jsonify({'status': 'error', 'message': 'Aucun fichier GPKG détecté.'}), 400
         if len(datasets) != 1:
             return jsonify({
                 'status': 'error',
