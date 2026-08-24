@@ -2,6 +2,7 @@ services:
   db_resilience:
     image: postgis/postgis:16-3.4
     container_name: telecom_db_resilience
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USERNAME_RESILIENCE:-app}
       POSTGRES_PASSWORD: ${DB_PASSWORD_RESILIENCE:-app}
