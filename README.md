@@ -2,58 +2,91 @@
 
 Application Flask dediee a la partie Resilience uniquement.
 
-- Web local: `http://localhost:8001/resilience`
-- Base locale: `db_resilience` PostGIS, port hote `5433`
-- Schema auth/data: `resilience`
-- Login template: `login_resilience.html`
-- Imports applicatifs: GPKG uniquement. L'import Shapefile est desactive pour les couches alea et les couches infra temporaires.
+- Web local : `http://localhost:8001/resilience`
+- Base locale : service PostGIS `db_resilience`, port hote `5433`
+- Schema d'authentification et de donnees : `resilience`
+- Page de connexion : `login_resilience.html`
+- Imports applicatifs : fichiers `.gpkg` uniquement pour les couches alea et les couches infra temporaires
 
-## Lancement local
+## Premier lancement local
 
-Copier l'exemple d'environnement puis remplacer les secrets:
+Copier l'exemple d'environnement uniquement pour une nouvelle installation :
 
 ```bash
 cp .env.docker.example .env
 ```
 
-Variables obligatoires ou principales:
+Renseigner ensuite les variables suivantes :
 
-- `DB_USERNAME_RESILIENCE`: utilisateur PostgreSQL existant, `app` par defaut.
-- `DB_PASSWORD_RESILIENCE`: obligatoire. Ne pas utiliser `app`; mettre un secret robuste.
-- `DB_NAME_RESILIENCE`: base PostgreSQL, `telecom_resilience_db` par defaut.
-- `SECRET_KEY`: secret Flask long et aleatoire.
-- `RESET_LINK_VIA_UI`: `0` en production.
+- `DB_USERNAME_RESILIENCE` : utilisateur PostgreSQL, `app` par defaut ;
+- `DB_PASSWORD_RESILIENCE` : mot de passe PostgreSQL robuste et obligatoire ;
+- `DB_NAME_RESILIENCE` : base PostgreSQL, `telecom_resilience_db` par defaut ;
+- `SECRET_KEY` : secret Flask long et aleatoire ;
+- `RESET_LINK_VIA_UI` : utiliser `0` en production.
 
-Demarrer sans supprimer le volume PostgreSQL:
+Demarrer l'application :
 
 ```bash
 docker compose up -d --build
 ```
 
-## Verification
+Verifier le lancement :
 
 ```bash
 docker compose ps
-curl http://localhost:8001/healthz
+curl -fsS http://localhost:8001/healthz
 ```
 
 ## Compte administrateur initial
 
-Le compte admin doit etre cree avec le role administrateur:
+Creer le premier compte avec le role administrateur :
 
 ```bash
 docker compose exec web_resilience python create_user.py admin_resilience "<MOT_DE_PASSE_ADMIN_ROBUSTE>" --admin
 ```
 
-Si le compte existe deja sans droit admin, la meme commande avec `--admin` le promeut administrateur sans changer son mot de passe.
+Si le compte existe deja sans les droits administrateur, la meme commande avec `--admin` le promeut sans modifier son mot de passe.
 
-Les autres comptes peuvent ensuite etre crees et geres depuis l'onglet `Admin. & Acces` par un administrateur connecte.
+Les autres comptes peuvent ensuite etre crees et geres depuis l'onglet `Admin. & Acces`.
 
-## Deploiement serveur HTTPS avec PostgreSQL existant
+## Redeploiement du serveur existant sans perte de donnees
 
-Ne jamais commiter `.env`, `.env.docker`, un vrai mot de passe ou un dump de production.
+Cette procedure doit etre utilisee lorsque PostgreSQL contient deja des couches, des analyses ou des comptes utilisateurs.
 
-1. Recuperer la branche de deploiement:
+### Regles importantes
+
+- Ne jamais lancer `docker compose down -v`.
+- Ne jamais supprimer le volume PostgreSQL `db_resilience_data`.
+- Ne jamais utiliser `docker volume rm` ou `docker system prune --volumes` pour ce projet.
+- Ne pas recopier `.env.docker.example` sur le fichier `.env` existant.
+- Conserver les valeurs actuelles de `DB_USERNAME_RESILIENCE`, `DB_NAME_RESILIENCE` et `SECRET_KEY`.
+- Utiliser `docker compose up -d --build` : cette commande reconstruit les conteneurs sans supprimer le volume.
+
+### 1. Verifier l'etat actuel
+
+Depuis le dossier du projet sur le serveur :
+
+```bash
+git status --short
+docker compose ps
+```
+
+Si `git status --short` affiche des modifications sur des fichiers suivis, ne pas continuer avant de les avoir sauvegardees.
+
+### 2. Sauvegarder PostgreSQL avant toute modification
+
+La sauvegarde est placee en dehors du depot Git :
+
+```bash
+mkdir -p ../backups_sipperesiste
+BACKUP_FILE="../backups_sipperesiste/resilience_$(date +%Y%m%d_%H%M%S).dump"
+docker compose exec -T db_resilience sh -lc 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$BACKUP_FILE"
+test -s "$BACKUP_FILE" && ls -lh "$BACKUP_FILE"
+```
+
+Ne poursuivre que si la derniere commande affiche un fichier de sauvegarde non vide.
+
+### 3. Recuperer la derniere version
 
 ```bash
 git fetch origin
@@ -61,81 +94,70 @@ git checkout romain-test-nouvelle-version
 git pull --ff-only origin romain-test-nouvelle-version
 ```
 
-2. Mettre a jour `.env` sur le serveur avec un secret robuste:
+### 4. Preparer le nouveau mot de passe PostgreSQL
+
+Generer un secret robuste :
+
+```bash
+NEW_DB_PASSWORD="$(openssl rand -base64 32)"
+printf '%s\n' "$NEW_DB_PASSWORD"
+```
+
+Modifier le fichier `.env` existant et renseigner exactement la valeur affichee :
 
 ```env
 DB_USERNAME_RESILIENCE=app
-DB_PASSWORD_RESILIENCE=<NOUVEAU_SECRET_POSTGRESQL_ROBUSTE>
+DB_PASSWORD_RESILIENCE=<COLLER_ICI_LE_NOUVEAU_MOT_DE_PASSE>
 DB_NAME_RESILIENCE=telecom_resilience_db
 RESET_LINK_VIA_UI=0
 ```
 
-3. Si la base existe deja, appliquer le nouveau mot de passe au role PostgreSQL. Modifier `POSTGRES_PASSWORD` dans `.env` ne change pas le mot de passe du role deja initialise:
+Ne pas modifier `DB_USERNAME_RESILIENCE` ni `DB_NAME_RESILIENCE` si la base existante utilise deja ces valeurs. Ne pas publier le mot de passe et ne pas commiter `.env`.
+
+### 5. Appliquer le meme mot de passe au role PostgreSQL existant
+
+La valeur utilisee ici doit etre strictement identique a celle placee dans `.env` :
 
 ```bash
 docker compose up -d db_resilience
-docker compose exec -T db_resilience sh -lc 'psql -U app -d "$POSTGRES_DB" -v pw="$POSTGRES_PASSWORD" -c "ALTER ROLE app WITH PASSWORD :'\''pw'\'';"'
+docker compose exec -T db_resilience psql \
+  -v ON_ERROR_STOP=1 \
+  -U app \
+  -d telecom_resilience_db \
+  -v new_password="$NEW_DB_PASSWORD" \
+  -c "ALTER ROLE app WITH PASSWORD :'new_password';"
+unset NEW_DB_PASSWORD
 ```
 
-4. Reconstruire et relancer l'application Flask:
+Si `DB_USERNAME_RESILIENCE` ou `DB_NAME_RESILIENCE` ne valent pas respectivement `app` et `telecom_resilience_db` dans le `.env` existant, remplacer ces valeurs dans la commande avant de l'executer.
+
+### 6. Reconstruire et relancer sans supprimer le volume
 
 ```bash
-docker compose up -d --build web_resilience
+docker compose up -d --build
 ```
 
-5. Verifier:
+Ne pas lancer de commande `down -v` avant ou apres cette etape.
+
+### 7. Verifier le redeploiement
 
 ```bash
 docker compose ps
-curl https://<DOMAINE_HTTPS>/healthz
+docker compose logs --tail=100 web_resilience
+curl -fsS https://sipperesiste.srv.comptoirdessignaux.com/healthz
 ```
+
+Verifier ensuite la connexion sur :
+
+`https://sipperesiste.srv.comptoirdessignaux.com/login`
+
+Les comptes utilisateurs, les couches et les analyses deja enregistres doivent toujours etre presents. Il n'est pas necessaire de recreer les comptes apres un redeploiement normal.
 
 ## Imports de donnees
 
-L'application accepte uniquement des fichiers `.gpkg` pour:
+L'application accepte uniquement des fichiers `.gpkg` pour :
 
-- les couches alea partagees;
+- les couches alea partagees ;
 - la couche infra temporaire utilisee dans une analyse reseau.
 
 Les composants Shapefile (`.shp`, `.shx`, `.dbf`, `.prj`, `.cpg`, etc.) ne sont plus acceptes a l'import.
-
-## Render Blueprint
-
-Le fichier `render.yaml` permet de creer:
-
-- un service web Docker `sipperesiste-resilience`
-- une base Postgres `sipperesiste-resilience-db`
-- les variables d'environnement necessaires a l'application
-
-L'application active PostGIS et cree le schema `resilience` automatiquement au premier acces.
-
-## Render manuel
-
-Creer un service web Docker qui lance:
-
-```bash
-gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 0 --graceful-timeout 300 app_resilience:app
-```
-
-Variables principales:
-
-```env
-SECRET_KEY=<SECRET_FLASK_LONG_ET_ALEATOIRE>
-DB_HOST=host_interne_render_postgres
-DB_PORT=5432
-DB_USERNAME=user_render
-DB_PASSWORD=<SECRET_POSTGRESQL_RENDER>
-DB_NAME=database_render
-DB_SEARCH_PATH=resilience,public
-AUTH_SCHEMA=resilience
-LOGIN_TEMPLATE=login_resilience.html
-RESET_LINK_VIA_UI=0
-APP_BASE_URL=https://ton-service.onrender.com
-```
-
-Dans la base Render, activer PostGIS et le schema:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS postgis;
-CREATE SCHEMA IF NOT EXISTS resilience;
-```
